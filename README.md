@@ -11,6 +11,10 @@ A secure command-line password manager written in C++17. Passwords are encrypted
 - **Password generator**: Built-in cryptographically secure random password generation
 - **Cross-platform**: Works on Linux, macOS, and Windows
 
+## Features coming soon
+- **TOTP Support**
+- **Entropie calculation**
+
 ## Security Design
 
 ```
