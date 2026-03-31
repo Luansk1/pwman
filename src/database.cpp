@@ -1,0 +1,269 @@
+#include "database.h"
+#include <sqlite3.h>
+#include <cstdlib>
+#include <filesystem>
+
+#ifdef _WIN32
+#include <shlobj.h>
+#else
+#include <pwd.h>
+#include <unistd.h>
+#endif
+
+namespace pwman {
+
+namespace {
+
+std::string get_home_dir() {
+#ifdef _WIN32
+    char path[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PROFILE, nullptr, 0, path))) {
+        return path;
+    }
+    const char* home = std::getenv("USERPROFILE");
+    return home ? home : ".";
+#else
+    const char* home = std::getenv("HOME");
+    if (home) return home;
+    struct passwd* pw = getpwuid(getuid());
+    return pw ? pw->pw_dir : ".";
+#endif
+}
+
+// Helper to convert a blob column to vector<uint8_t>.
+std::vector<uint8_t> blob_to_vec(sqlite3_stmt* stmt, int col) {
+    const auto* data = static_cast<const uint8_t*>(sqlite3_column_blob(stmt, col));
+    int len = sqlite3_column_bytes(stmt, col);
+    if (!data || len <= 0) return {};
+    return {data, data + len};
+}
+
+} // namespace
+
+std::string default_db_path() {
+    namespace fs = std::filesystem;
+    fs::path dir = fs::path(get_home_dir()) / ".pwman";
+    if (!fs::exists(dir)) {
+        fs::create_directories(dir);
+    }
+    return (dir / "pwman.db").string();
+}
+
+Database::Database(const std::string& path) : path_(path) {
+    namespace fs = std::filesystem;
+    fs::path parent = fs::path(path).parent_path();
+    if (!parent.empty() && !fs::exists(parent)) {
+        fs::create_directories(parent);
+    }
+
+    int rc = sqlite3_open(path.c_str(), &db_);
+    if (rc != SQLITE_OK) {
+        std::string err = sqlite3_errmsg(db_);
+        sqlite3_close(db_);
+        db_ = nullptr;
+        throw DatabaseError("Cannot open database: " + err);
+    }
+
+    // Enable WAL mode and foreign keys
+    exec("PRAGMA journal_mode=WAL;");
+    exec("PRAGMA foreign_keys=ON;");
+}
+
+Database::~Database() {
+    if (db_) {
+        sqlite3_close(db_);
+    }
+}
+
+void Database::exec(const std::string& sql) {
+    char* err = nullptr;
+    int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err);
+    if (rc != SQLITE_OK) {
+        std::string msg = err ? err : "unknown error";
+        sqlite3_free(err);
+        throw DatabaseError("SQL error: " + msg);
+    }
+}
+
+void Database::init(const std::vector<uint8_t>& salt, const std::vector<uint8_t>& encrypted_verify) {
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS meta (
+            key   TEXT PRIMARY KEY,
+            value BLOB NOT NULL
+        );
+    )");
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS entries (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            name         TEXT NOT NULL UNIQUE,
+            enc_username BLOB NOT NULL,
+            enc_password BLOB NOT NULL,
+            enc_url      BLOB,
+            enc_notes    BLOB,
+            created_at   TEXT DEFAULT (datetime('now')),
+            updated_at   TEXT DEFAULT (datetime('now'))
+        );
+    )");
+
+    // Store salt and verify token
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?);";
+
+    // Salt
+    sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, "salt", -1, SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 2, salt.data(), static_cast<int>(salt.size()), SQLITE_STATIC);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        throw DatabaseError("Failed to store salt");
+    }
+    sqlite3_finalize(stmt);
+
+    // Verify token
+    sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, "verify", -1, SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 2, encrypted_verify.data(),
+                      static_cast<int>(encrypted_verify.size()), SQLITE_STATIC);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        throw DatabaseError("Failed to store verify token");
+    }
+    sqlite3_finalize(stmt);
+}
+
+bool Database::is_initialized() const {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT name FROM sqlite_master WHERE type='table' AND name='meta';";
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return false;
+
+    bool found = (sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+std::vector<uint8_t> Database::load_salt() const {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT value FROM meta WHERE key='salt';";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw DatabaseError("Failed to query salt");
+    }
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        throw DatabaseError("No salt found in database");
+    }
+    auto result = blob_to_vec(stmt, 0);
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+std::vector<uint8_t> Database::load_verify_token() const {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT value FROM meta WHERE key='verify';";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw DatabaseError("Failed to query verify token");
+    }
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        throw DatabaseError("No verify token found");
+    }
+    auto result = blob_to_vec(stmt, 0);
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+int64_t Database::add_entry(const std::string& name,
+                            const std::vector<uint8_t>& enc_username,
+                            const std::vector<uint8_t>& enc_password,
+                            const std::vector<uint8_t>& enc_url,
+                            const std::vector<uint8_t>& enc_notes) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = R"(
+        INSERT INTO entries (name, enc_username, enc_password, enc_url, enc_notes)
+        VALUES (?, ?, ?, ?, ?);
+    )";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw DatabaseError(std::string("Prepare failed: ") + sqlite3_errmsg(db_));
+    }
+
+    sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 2, enc_username.data(), static_cast<int>(enc_username.size()), SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 3, enc_password.data(), static_cast<int>(enc_password.size()), SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 4, enc_url.data(), static_cast<int>(enc_url.size()), SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 5, enc_notes.data(), static_cast<int>(enc_notes.size()), SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        std::string err = sqlite3_errmsg(db_);
+        sqlite3_finalize(stmt);
+        throw DatabaseError("Failed to add entry: " + err);
+    }
+
+    int64_t id = sqlite3_last_insert_rowid(db_);
+    sqlite3_finalize(stmt);
+    return id;
+}
+
+std::vector<Database::ListItem> Database::list_entries() const {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT id, name FROM entries ORDER BY name;";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw DatabaseError("Failed to list entries");
+    }
+
+    std::vector<ListItem> items;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        ListItem item;
+        item.id = sqlite3_column_int64(stmt, 0);
+        item.name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        items.push_back(std::move(item));
+    }
+    sqlite3_finalize(stmt);
+    return items;
+}
+
+std::optional<Database::EncryptedEntry> Database::get_entry(const std::string& name) const {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = R"(
+        SELECT id, name, enc_username, enc_password, enc_url, enc_notes
+        FROM entries WHERE name = ?;
+    )";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw DatabaseError("Failed to query entry");
+    }
+    sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return std::nullopt;
+    }
+
+    EncryptedEntry entry;
+    entry.id = sqlite3_column_int64(stmt, 0);
+    entry.name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+    entry.enc_username = blob_to_vec(stmt, 2);
+    entry.enc_password = blob_to_vec(stmt, 3);
+    entry.enc_url = blob_to_vec(stmt, 4);
+    entry.enc_notes = blob_to_vec(stmt, 5);
+    sqlite3_finalize(stmt);
+    return entry;
+}
+
+bool Database::delete_entry(const std::string& name) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "DELETE FROM entries WHERE name = ?;";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw DatabaseError("Failed to delete entry");
+    }
+    sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        throw DatabaseError("Delete failed");
+    }
+
+    int changes = sqlite3_changes(db_);
+    sqlite3_finalize(stmt);
+    return changes > 0;
+}
+
+} // namespace pwman
