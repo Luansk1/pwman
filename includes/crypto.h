@@ -20,6 +20,13 @@ namespace pwman{
         std::vector<uint8_t> salt;  // 16 bytes
     };
 
+    enum PasswordStrength {
+        WEAK,
+        MEDIUM,
+        STRONG
+    };
+
+
     void crypto_init();
 
     DerivedKey derive_key(const std::string& password);
@@ -34,6 +41,9 @@ namespace pwman{
     void secure_zero(std::vector<uint8_t>& v);
 
     std::string generate_password(size_t length = 20);
+
+    PasswordStrength evaluate_password_strength(const std::string& password);
+    double calculate_password_entropy(const std::string& password);
 
     
 }
