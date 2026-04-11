@@ -14,6 +14,8 @@ namespace pwman {
 
     void print_usage(const std::string& program);
 
-    int cmd_totp(); // Enable TOTP support in the future
+    int cmd_totp(const std::string& db_path, const std::string& entry_name);
+    int cmd_totp_add(const std::string& db_path, const std::string& entry_name);
+    int cmd_totp_del(const std::string& db_path, const std::string& entry_name);
 
 }

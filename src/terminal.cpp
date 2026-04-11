@@ -106,4 +106,63 @@ void print_info(const std::string& msg) {
     std::cout << "[*] " << msg << "\n";
 }
 
+void print_totp_code(const std::string& name,
+                     const std::string& code,
+                     int remaining_seconds,
+                     int period) {
+
+    // "483297" → "483 297",  "94287082" → "9428 7082"
+    std::string display_code;
+    size_t half = code.size() / 2;
+    for (size_t i = 0; i < code.size(); ++i) {
+        if (i == half) display_code += ' ';
+        display_code += code[i];
+    }
+
+    // Calcuclate progress bar 
+    const int bar_width = 20;
+    int filled = (remaining_seconds * bar_width) / period;
+    if (filled < 0) filled = 0;
+    if (filled > bar_width) filled = bar_width;
+
+    std::string bar;
+    for (int i = 0; i < bar_width; ++i) {
+        bar += (i < filled) ? '#' : '-';
+    }
+
+    // Countdown-Farbe: unter 5 Sekunden = Warnung
+    std::string time_str = std::to_string(remaining_seconds) + "s";
+
+    // Box-Breite berechnen
+    std::string title = name + " - TOTP";
+    size_t content_width = display_code.size();
+    if (content_width < title.size()) content_width = title.size();
+    // Bar-Zeile: [bar] XXs / XXs
+    std::string bar_line = "[" + bar + "] " + time_str + " / " + std::to_string(period) + "s";
+    if (content_width < bar_line.size()) content_width = bar_line.size();
+    content_width += 4; // padding
+
+    // Horizontale Linie
+    std::string h_line(content_width, '-');
+
+    // Zentrieren
+    auto center = [&](const std::string& text) -> std::string {
+        if (text.size() >= content_width) return text;
+        size_t pad_left = (content_width - text.size()) / 2;
+        size_t pad_right = content_width - text.size() - pad_left;
+        return std::string(pad_left, ' ') + text + std::string(pad_right, ' ');
+    };
+
+    std::cout << "\n";
+    std::cout << "+" << h_line << "+" << "\n";
+    std::cout << "|" << center(title) << "|" << "\n";
+    std::cout << "+" << h_line << "+" << "\n";
+    std::cout << "|" << std::string(content_width, ' ') << "|" << "\n";
+    std::cout << "|" << center(display_code) << "|" << "\n";
+    std::cout << "|" << std::string(content_width, ' ') << "|" << "\n";
+    std::cout << "|" << center(bar_line) << "|" << "\n";
+    std::cout << "|" << std::string(content_width, ' ') << "|" << "\n";
+    std::cout << "+" << h_line << "+" << "\n";
+    std::cout << "\n";
+    }
 } // namespace pwman

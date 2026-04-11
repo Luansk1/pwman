@@ -2,6 +2,7 @@
 #include "crypto.h"
 #include "database.h"
 #include "terminal.h"
+#include "totp.h"
 
 #include <iostream>
 #include <string>
@@ -243,10 +244,170 @@ void print_usage(const std::string& program) {
               << "  " << program << " get <name>            Retrieve an entry\n"
               << "  " << program << " list                  List all entries\n"
               << "  " << program << " del <name>            Delete an entry\n"
+              << "  " << program << " totp [add|del] <name> Manage TOTP for an entry\n"
               << "  " << program << " gen [length]          Generate a random password\n"
               << "\nOptions:\n"
               << "  --db <path>          Use a custom database path\n"
               << "  --help, -h           Show this help message\n";
+}
+
+
+// --- TOTP Commands ---
+
+int cmd_totp_add(const std::string& db_path, const std::string& entry_name){
+    Database db(db_path);
+    if (!db.is_initialized()) {
+        print_error("Database not initialized. Run 'pwman init' first.");
+        return 1;
+    }
+
+    auto entry = db.get_entry(entry_name);
+    if (!entry.has_value()) {
+        print_error("Entry '" + entry_name + "' not found. Add it first with 'pwman add'.");
+        return 1;
+    }
+
+    if (db.has_totp(entry_name)) {
+        print_error("Entry '" + entry_name + "' already has TOTP configured.");
+        print_info("Delete it first with 'pwman totp del " + entry_name + "'.");
+        return 1;
+    }
+
+    auto dk = unlock(db);
+
+    std::string input;
+    std::cout << "OTP secret or otpauth:// URI: " << std::flush;
+    std::getline(std::cin, input);
+
+    if (input.empty()) {
+        secure_zero(dk.key);
+        print_error("No secret provided.");
+        return 1;
+    }
+
+    std::string secret_base32;
+    std::string algorithm = "SHA1";
+    int digits = 6;
+    int period = 30;
+
+    if (input.rfind("otpauth://", 0) == 0) {
+        // Parse otpauth:// URI
+
+        std::cout << "Oauth URI currently not supported" << std::endl;
+        /*
+        try {
+            auto config = parse_otpauth_uri(input);
+            secret_base32 = config.secret_base32;
+            algorithm = algorithm_to_string(config.algorithm);
+            digits = config.digits;
+            period = config.period;
+        } catch (const std::exception& e) {
+            secure_zero(dk.key);
+            secure_zero(input);
+            print_error(std::string("Invalid URI: ") + e.what());
+            return 1;
+        }*/
+    } else {
+        // Raw Base32 secret
+        secret_base32 = base32_normalize(input);
+        if (!base32_validate(secret_base32)) {
+            secure_zero(dk.key);
+            secure_zero(input);
+            print_error("Invalid Base32 secret.");
+            return 1;
+        }
+    }
+
+    secure_zero(input);
+
+    // Encrypt the base32 secret and store it
+    auto enc_secret = encrypt(dk.key, secret_base32);
+
+    // Verify: generate a code to confirm it works
+    auto raw_secret = base32_decode(secret_base32);
+    auto algo = string_to_algorithm(algorithm);
+    auto code = totp_generate(raw_secret, algo, digits, period);
+    int remaining = totp_remaining_seconds(period);
+
+    secure_zero(secret_base32);
+    secure_zero(raw_secret);
+
+    db.set_totp(entry->id, enc_secret, algorithm, digits, period);
+    secure_zero(dk.key);
+
+    print_success("TOTP configured for '" + entry_name + "'.");
+    print_totp_code(entry_name, code, remaining, period);
+
+    return 0;
+}
+
+int cmd_totp_del(const std::string& db_path, const std::string& entry_name){
+    Database db(db_path);
+    if (!db.is_initialized()) {
+        print_error("Database not initialized. Run 'pwman init' first.");
+        return 1;
+    }
+
+    if (!db.has_totp(entry_name)) {
+        print_error("No TOTP configured for '" + entry_name + "'.");
+        return 1;
+    }
+
+    auto dk = unlock(db);
+    secure_zero(dk.key);
+
+    std::cout << "Remove TOTP from '" << entry_name << "'? [y/N]: " << std::flush;
+    std::string answer;
+    std::getline(std::cin, answer);
+
+    if (answer != "y" && answer != "Y") {
+        print_info("Aborted.");
+        return 0;
+    }
+
+    if (db.delete_totp(entry_name)) {
+        print_success("TOTP removed from '" + entry_name + "'.");
+    } else {
+        print_error("Failed to remove TOTP.");
+        return 1;
+    }
+
+    return 0;
+}
+
+int cmd_totp(const std::string& db_path, const std::string& entry_name) {
+    Database db(db_path);
+    if (!db.is_initialized()) {
+        print_error("Database not initialized. Run 'pwman init' first.");
+        return 1;
+    }
+
+    auto totp_data = db.get_totp(entry_name);
+    if (!totp_data.has_value()) {
+        print_error("No TOTP configured for '" + entry_name + "'.");
+        print_info("Add one with 'pwman totp add " + entry_name + "'.");
+        return 1;
+    }
+
+    auto dk = unlock(db);
+
+    // Decrypt the base32 secret
+    std::string secret_base32 = decrypt(dk.key, totp_data->enc_secret);
+    secure_zero(dk.key);
+
+    // Decode and generate
+    auto raw_secret = base32_decode(secret_base32);
+    secure_zero(secret_base32);
+
+    auto algo = string_to_algorithm(totp_data->algorithm);
+    auto code = pwman::totp_generate(raw_secret, algo, totp_data->digits, totp_data->period);
+    int remaining = pwman::totp_remaining_seconds(totp_data->period);
+
+    secure_zero(raw_secret);
+
+    print_totp_code(entry_name, code, remaining, totp_data->period);
+
+    return 0;
 }
 
 } // namespace pwman

@@ -23,4 +23,10 @@ void print_error(const std::string& msg);
 // Print an info message.
 void print_info(const std::string& msg);
 
+// Print TOTP code with remaining time.
+void print_totp_code(const std::string& name,
+                     const std::string& code,
+                     int remaining_seconds,
+                     int period);
+
 } // namespace pwman

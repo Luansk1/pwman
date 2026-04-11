@@ -1,12 +1,19 @@
 #include "crypto.h"
+#include "commands.h"
 #include "database.h"
 #include "terminal.h"
 
+#include "base32.h"
+#include "hmac.h"
+#include "totp.h"
+
+#include <sodium.h>
 #include <iostream>
 #include <string>
 #include <vector>
+#include <chrono>
 
-
+using namespace pwman; 
 
 int main(int argc, char* argv[]) {
     try {
@@ -36,6 +43,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+
     if (command.empty()) {
         pwman::print_usage(program);
         return 1;
@@ -64,12 +72,24 @@ int main(int argc, char* argv[]) {
             size_t length = 20;
             if (!cmd_args.empty()) {
                 length = std::stoul(cmd_args[0]);
-                if (length < 8 || length > 128) {
-                    pwman::print_error("Password length must be between 8 and 128.");
+                if (length < 10 || length > 128) {
+                    pwman::print_error("Password length must be between 10 and 128.");
                     return 1;
                 }
             }
             return pwman::cmd_gen(length);
+        } else if(command == "totp") {
+            if(cmd_args.empty()){
+                pwman::print_error("Usage: " + program + " totp [Optional]<add|del> <entry_name>");
+                return 1;
+            }
+            if (cmd_args[0] == "add"){
+                return pwman::cmd_totp_add(db_path, cmd_args[1]);
+            } else if (cmd_args[0] == "del"){
+                return pwman::cmd_totp_del(db_path, cmd_args[1]);
+            } 
+            
+            return pwman::cmd_totp(db_path, cmd_args[0]); 
         } else {
             pwman::print_error("Unknown command: " + command);
             pwman::print_usage(program);
@@ -81,6 +101,9 @@ int main(int argc, char* argv[]) {
     } catch (const pwman::DatabaseError& e) {
         pwman::print_error(e.what());
         return 1;
+    } catch (const pwman::TotpError& e){
+        pwman::print_error(e.what());
+        return 1; 
     } catch (const std::exception& e) {
         pwman::print_error(std::string("Unexpected error: ") + e.what());
         return 1;

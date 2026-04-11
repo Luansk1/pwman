@@ -86,6 +86,7 @@ void Database::exec(const std::string& sql) {
 }
 
 void Database::init(const std::vector<uint8_t>& salt, const std::vector<uint8_t>& encrypted_verify) {
+    // ── Schema v1: Basis-Tabellen ──
     exec(R"(
         CREATE TABLE IF NOT EXISTS meta (
             key   TEXT PRIMARY KEY,
@@ -104,6 +105,10 @@ void Database::init(const std::vector<uint8_t>& salt, const std::vector<uint8_t>
             updated_at   TEXT DEFAULT (datetime('now'))
         );
     )");
+
+    // Setze initiale Schema-Version und führe Migrationen aus
+    set_schema_version(1);
+    migrate();
 
     // Store salt and verify token
     sqlite3_stmt* stmt = nullptr;
@@ -139,6 +144,13 @@ bool Database::is_initialized() const {
 
     bool found = (sqlite3_step(stmt) == SQLITE_ROW);
     sqlite3_finalize(stmt);
+
+    // Bestehende DB? Migrationen ausführen (const_cast ist OK,
+    // weil migrate() nur Schema ändert, nicht den logischen Zustand)
+    if (found) {
+        const_cast<Database*>(this)->migrate();
+    }
+
     return found;
 }
 
@@ -264,6 +276,162 @@ bool Database::delete_entry(const std::string& name) {
     int changes = sqlite3_changes(db_);
     sqlite3_finalize(stmt);
     return changes > 0;
+}
+
+// ── Schema Versioning & Migration ─────────────────────────
+
+int Database::schema_version() const {
+    // Prüfe ob die meta-Tabelle existiert
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT value FROM meta WHERE key='schema_version';";
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return 0;
+
+    int version = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        // schema_version ist als Text-BLOB gespeichert
+        const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        if (text) version = std::atoi(text);
+    }
+    sqlite3_finalize(stmt);
+    return version;
+}
+
+void Database::set_schema_version(int version) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?);";
+    sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    std::string ver_str = std::to_string(version);
+    sqlite3_bind_text(stmt, 1, ver_str.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        throw DatabaseError("Failed to set schema version");
+    }
+    sqlite3_finalize(stmt);
+}
+
+void Database::migrate() {
+    int current = schema_version();
+
+    // v1 → v2: TOTP-Tabelle hinzufügen
+    if (current < 2) {
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS totp_entries (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id   INTEGER NOT NULL UNIQUE,
+                enc_secret BLOB NOT NULL,
+                algorithm  TEXT NOT NULL DEFAULT 'SHA1',
+                digits     INTEGER NOT NULL DEFAULT 6,
+                period     INTEGER NOT NULL DEFAULT 30,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
+            );
+        )");
+        set_schema_version(2);
+    }
+
+    // Zukünftige Migrationen:
+    // if (current < 3) { ... set_schema_version(3); }
+}
+
+// ── TOTP CRUD ─────────────────────────────────────────────
+
+void Database::set_totp(int64_t entry_id,
+                        const std::vector<uint8_t>& enc_secret,
+                        const std::string& algorithm,
+                        int digits,
+                        int period) {
+    // INSERT OR REPLACE: Wenn der Entry schon TOTP hat, wird es ersetzt
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = R"(
+        INSERT OR REPLACE INTO totp_entries (entry_id, enc_secret, algorithm, digits, period)
+        VALUES (?, ?, ?, ?, ?);
+    )";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw DatabaseError(std::string("Prepare failed: ") + sqlite3_errmsg(db_));
+    }
+
+    sqlite3_bind_int64(stmt, 1, entry_id);
+    sqlite3_bind_blob(stmt, 2, enc_secret.data(),
+                      static_cast<int>(enc_secret.size()), SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, algorithm.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, digits);
+    sqlite3_bind_int(stmt, 5, period);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        std::string err = sqlite3_errmsg(db_);
+        sqlite3_finalize(stmt);
+        throw DatabaseError("Failed to set TOTP: " + err);
+    }
+    sqlite3_finalize(stmt);
+}
+
+std::optional<Database::TOTPEntry> Database::get_totp(const std::string& entry_name) const {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = R"(
+        SELECT t.id, t.entry_id, t.enc_secret, t.algorithm, t.digits, t.period
+        FROM totp_entries t
+        JOIN entries e ON e.id = t.entry_id
+        WHERE e.name = ?;
+    )";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw DatabaseError("Failed to query TOTP");
+    }
+    sqlite3_bind_text(stmt, 1, entry_name.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return std::nullopt;
+    }
+
+    TOTPEntry totp;
+    totp.id = sqlite3_column_int64(stmt, 0);
+    totp.entry_id = sqlite3_column_int64(stmt, 1);
+    totp.enc_secret = blob_to_vec(stmt, 2);
+    const auto* algo = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+    totp.algorithm = algo ? algo : "SHA1";
+    totp.digits = sqlite3_column_int(stmt, 4);
+    totp.period = sqlite3_column_int(stmt, 5);
+    sqlite3_finalize(stmt);
+    return totp;
+}
+
+bool Database::delete_totp(const std::string& entry_name) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = R"(
+        DELETE FROM totp_entries
+        WHERE entry_id = (SELECT id FROM entries WHERE name = ?);
+    )";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw DatabaseError("Failed to delete TOTP");
+    }
+    sqlite3_bind_text(stmt, 1, entry_name.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        throw DatabaseError("TOTP delete failed");
+    }
+
+    int changes = sqlite3_changes(db_);
+    sqlite3_finalize(stmt);
+    return changes > 0;
+}
+
+bool Database::has_totp(const std::string& entry_name) const {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = R"(
+        SELECT 1 FROM totp_entries t
+        JOIN entries e ON e.id = t.entry_id
+        WHERE e.name = ?
+        LIMIT 1;
+    )";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    sqlite3_bind_text(stmt, 1, entry_name.c_str(), -1, SQLITE_STATIC);
+    bool found = (sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+    return found;
 }
 
 } // namespace pwman

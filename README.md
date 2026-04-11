@@ -38,6 +38,8 @@ Master Password
 - Entry names are stored in plaintext so that `list` works without unlocking.
 - Sensitive memory (keys, decrypted passwords) is zeroed using `sodium_memzero`.
 
+## TOTP Flow
+
 ## Dependencies
 
 - **libsodium** >= 1.0.18

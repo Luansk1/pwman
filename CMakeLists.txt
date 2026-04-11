@@ -16,8 +16,11 @@ add_library(pwman_lib STATIC
     src/database.cpp
     src/terminal.cpp
     src/commands.cpp
+    src/base32.cpp
+    src/totp.cpp
+    src/hmac.cpp
 )
-target_include_directories(pwman_lib PUBLIC include)
+target_include_directories(pwman_lib PUBLIC includes)
 target_link_libraries(pwman_lib PUBLIC PkgConfig::SODIUM PkgConfig::SQLITE3)
 
 # Executable
@@ -43,6 +46,8 @@ if(BUILD_TESTS)
         tests/test_crypto.cpp
         tests/test_database.cpp
         tests/test_terminal.cpp
+        tests/test_base32.cpp
+        tests/test_hmac.cpp
     )
     target_link_libraries(pwman_tests PRIVATE pwman_lib GTest::gtest_main)
     target_include_directories(pwman_tests PRIVATE include)

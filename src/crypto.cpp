@@ -1,6 +1,7 @@
-#include " crypto.h"
+#include "crypto.h"
 #include <sodium.h>
 #include <cstring>
+#include <cmath>
 
 namespace pwman {
 
@@ -132,4 +133,28 @@ std::string generate_password(size_t length) {
     return password;
 }
 
+PasswordStrength evaluate_password_strength(const std::string& password) {
+    size_t length = password.size();
+
+    const int maxCharsetSize = 88; // 26 lowercase + 26 uppercase + 10 digits + 32 symbols
+
+    const double entropy = std::log2(maxCharsetSize) * length;
+    
+    if(entropy <= 35){
+        return WEAK; 
+    } else if(entropy >= 36 && entropy <= 59){
+        return MEDIUM;
+    } else {
+        return STRONG;
+    }
+
+}
+
+double calculate_password_entropy(const std::string& password) {
+    size_t length = password.size();
+
+    const int maxCharsetSize = 88; // 26 lowercase + 26 uppercase + 10 digits + 32 symbols
+
+    return std::log2(maxCharsetSize) * length;
 } // namespace pwman
+}
