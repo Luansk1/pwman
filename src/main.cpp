@@ -43,6 +43,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    pwman::base32_validate("");
+    //std::cout<< pwman::base32_validate("  ") << std::endl; 
+    //std::cout<< pwman::base32_validate("---") << std::endl;
+
 
     if (command.empty()) {
         pwman::print_usage(program);

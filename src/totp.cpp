@@ -49,7 +49,7 @@ namespace pwman {
                         (static_cast<uint32_t>(mac[offset + 2]) << 8) |
                         (static_cast<uint32_t>(mac[offset + 3]));
 
-        code &= 0x7FFFFFFF; // Remove the sign bit
+        //code &= 0x7FFFFFFF; // Remove the sign bit
         code %= static_cast<uint32_t>(std::pow(10, digits)); // Modulo to get the correct number of digits  
 
         return std::to_string(code);

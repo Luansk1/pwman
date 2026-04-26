@@ -1,5 +1,5 @@
 #include "base32.h"
-
+#include <iostream>
 #include <algorithm>
 #include <cctype>
 
@@ -8,7 +8,7 @@ namespace pwman {
     static constexpr char ENCODE_TABLE[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 
-    // Loopup table ASCII value -> 5-bit value (0-31), 0xFF = invalid
+    // Lookup table ASCII value -> 5-bit value (0-31), 0xFF = invalid
     static constexpr uint8_t INVALID = 0xFF;
     static constexpr uint8_t PADDING = 0xFE;
 
@@ -50,16 +50,14 @@ namespace pwman {
     bool base32_validate(const std::string& input ){
         std::string normalized = base32_normalize(input);
 
-        if(normalized.empty()){
-            throw Base32Error("Empty input");
-        }
 
         bool is_padding = false; 
         size_t data_len = 0; 
 
         for (size_t i = 0; i< normalized.size(); ++i){
             uint8_t val = DECODE_TABLE.values[static_cast<unsigned char>(normalized[i])];
-
+            std::cout << "Char: '" << normalized[i] << "' -> Val: " << static_cast<int>(val) << std::endl;
+            
             if (val == INVALID){
                 return false; 
             }
@@ -88,6 +86,10 @@ namespace pwman {
 
     std::vector<uint8_t> base32_decode(const std::string& input){
         std::string normalized = base32_normalize(input);
+
+        if(normalized.empty()){
+            throw Base32Error("Empty input");
+        }
 
         // Strip padding - reserve output size in heap.
         std::string data;
