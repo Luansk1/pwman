@@ -8,7 +8,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Dependencies via pkg-config
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
-pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
+# SQLCipher is a drop-in SQLite replacement that transparently encrypts the
+# whole database file. Its headers live under include/sqlcipher and expose the
+# standard <sqlite3.h> API, so no source changes are needed beyond linking it.
+pkg_check_modules(SQLCIPHER REQUIRED IMPORTED_TARGET sqlcipher)
 
 # Main library (shared between exe and tests)
 add_library(pwman_lib STATIC
@@ -21,11 +24,15 @@ add_library(pwman_lib STATIC
     src/hmac.cpp
 )
 target_include_directories(pwman_lib PUBLIC includes)
-target_link_libraries(pwman_lib PUBLIC PkgConfig::SODIUM PkgConfig::SQLITE3)
+target_link_libraries(pwman_lib PUBLIC PkgConfig::SODIUM PkgConfig::SQLCIPHER)
 
 # Executable
 add_executable(pwman src/main.cpp)
 target_link_libraries(pwman PRIVATE pwman_lib)
+
+# Install rule: `cmake --install build` copies the binary into <prefix>/bin.
+# Override the prefix with e.g. `cmake --install build --prefix /opt/homebrew`.
+install(TARGETS pwman RUNTIME DESTINATION bin)
 
 # Tests
 option(BUILD_TESTS "Build unit tests" ON)
@@ -50,7 +57,7 @@ if(BUILD_TESTS)
         tests/test_hmac.cpp
     )
     target_link_libraries(pwman_tests PRIVATE pwman_lib GTest::gtest_main)
-    target_include_directories(pwman_tests PRIVATE include)
+    target_include_directories(pwman_tests PRIVATE includes)
 
     include(GoogleTest)
     gtest_discover_tests(pwman_tests)

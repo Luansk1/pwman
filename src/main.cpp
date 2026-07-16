@@ -43,13 +43,17 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    pwman::base32_validate("");
-    //std::cout<< pwman::base32_validate("  ") << std::endl; 
-    //std::cout<< pwman::base32_validate("---") << std::endl;
-
-
     if (command.empty()) {
         pwman::print_usage(program);
+        return 1;
+    }
+
+    // Enforce the custom vault extension for every command that touches the
+    // database. 'gen' is purely offline and needs no database file.
+    if (command != "gen" && !pwman::has_vault_extension(db_path)) {
+        pwman::print_error("Database file must use the '" +
+                           std::string(pwman::kVaultExtension) +
+                           "' extension: " + db_path);
         return 1;
     }
 

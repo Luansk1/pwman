@@ -20,15 +20,22 @@ namespace pwman {
     }
 
     std::string totp_generate(const std::vector<uint8_t>& secret,
-                            HashAlgorithm algo, 
-                            int digits, 
+                            HashAlgorithm algo,
+                            int digits,
                             int period){
 
-        
-        const auto now = std::chrono::system_clock::now(); 
+        if (digits < 6 || digits > 8) {
+            throw TotpError("Invalid digits (must be 6, 7, or 8): " +
+                            std::to_string(digits));
+        }
+        if (period <= 0) {
+            throw TotpError("Invalid period: " + std::to_string(period));
+        }
+
+        const auto now = std::chrono::system_clock::now();
         const auto unix_time = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-        
-        uint64_t time_step = unix_time / period; 
+
+        uint64_t time_step = unix_time / period;
         std::vector<uint8_t> time_bytes(8);
 
         for(int i = 7; i >= 0; --i){
@@ -49,7 +56,7 @@ namespace pwman {
                         (static_cast<uint32_t>(mac[offset + 2]) << 8) |
                         (static_cast<uint32_t>(mac[offset + 3]));
 
-        //code &= 0x7FFFFFFF; // Remove the sign bit
+        code &= 0x7FFFFFFF; // Remove the sign bit
         code %= static_cast<uint32_t>(std::pow(10, digits)); // Modulo to get the correct number of digits  
 
         return std::to_string(code);

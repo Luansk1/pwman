@@ -1,12 +1,14 @@
 # pwman - Command Line Password Manager
 
-A secure command-line password manager written in C++17. Passwords are encrypted with XChaCha20-Poly1305 (via libsodium) and stored in a local SQLite database, protected by a master password derived using Argon2id.
+A secure command-line password manager written in C++17. The entire database is encrypted at rest with **SQLCipher**, and individual fields are additionally sealed with XChaCha20-Poly1305 (via libsodium) as defence in depth. Everything is protected by a single master password derived using Argon2id.
 
 ## Features
 
-- **Strong encryption**: XChaCha20-Poly1305 authenticated encryption for all stored data
+- **Full-database encryption**: SQLCipher encrypts the whole SQLite file — table names, indexes and structure are opaque at rest, not just the values
+- **Layered field encryption**: XChaCha20-Poly1305 authenticated encryption for each stored field on top of the SQLCipher layer
 - **Secure key derivation**: Argon2id with moderate parameters (via `crypto_pwhash`)
-- **Local storage**: SQLite database, no network access required
+- **Custom vault format**: databases use the `.pwv` extension and carry a recognition magic in the SQLite header so pwman can positively identify its own vaults
+- **Local storage**: single encrypted file, no network access required
 - **Hidden input**: Master password and entry passwords are never shown during input
 - **Password generator**: Built-in cryptographically secure random password generation
 - **Cross-platform**: Works on Linux, macOS, and Windows
@@ -18,24 +20,23 @@ A secure command-line password manager written in C++17. Passwords are encrypted
 ## Security Design
 
 ```
-Master Password
-      |
-      v
-  Argon2id (salt stored in DB)
-      |
-      v
-  256-bit Key
-      |
-      v
-  XChaCha20-Poly1305
-      |
-      v
-  Encrypted entries in SQLite
+                 Master Password
+                  /           \
+                 v             v
+   SQLCipher (PBKDF2)     Argon2id (salt in DB)
+        |                      |
+        v                      v
+  Whole-file key          256-bit field key
+        |                      |
+        v                      v
+  Encrypted .pwv file    XChaCha20-Poly1305 per field
 ```
 
-- The master password is never stored. A verification token (`"pwman_verify"`) is encrypted and stored; on unlock, the token is decrypted to verify the password.
+- The same master password unlocks two independent layers: SQLCipher (whole-file, its KDF salt lives in the file's plaintext 16-byte header) and Argon2id (per-field, its salt is stored inside the now-encrypted database).
+- The master password is never stored. A verification token (`"pwman_verify"`) is encrypted and stored; on unlock, the token is decrypted to verify the field key.
 - Each field (username, password, URL, notes) is encrypted independently with a unique random nonce.
-- Entry names are stored in plaintext so that `list` works without unlocking.
+- Because the whole file is encrypted, **every** command — including `list` — now requires the master password. Entry names are no longer readable without unlocking.
+- Vaults use the `.pwv` extension (the CLI refuses other file names) and set `PRAGMA application_id = 0x50574D31` ("PWM1") as a recognition magic, checked after decryption to confirm the file is a genuine pwman vault.
 - Sensitive memory (keys, decrypted passwords) is zeroed using `sodium_memzero`.
 
 ## TOTP Flow
@@ -43,7 +44,7 @@ Master Password
 ## Dependencies
 
 - **libsodium** >= 1.0.18
-- **SQLite3** >= 3.30
+- **SQLCipher** >= 4.0 (provides the `<sqlite3.h>` API with transparent encryption)
 - **CMake** >= 3.16
 - **pkg-config**
 - A C++17-capable compiler (GCC 8+, Clang 7+, MSVC 2019+)
@@ -52,22 +53,22 @@ Master Password
 
 **macOS (Homebrew):**
 ```bash
-brew install libsodium sqlite pkg-config cmake
+brew install libsodium sqlcipher pkg-config cmake
 ```
 
 **Ubuntu/Debian:**
 ```bash
-sudo apt install libsodium-dev libsqlite3-dev pkg-config cmake g++
+sudo apt install libsodium-dev libsqlcipher-dev pkg-config cmake g++
 ```
 
 **Arch Linux:**
 ```bash
-sudo pacman -S libsodium sqlite pkg-config cmake
+sudo pacman -S libsodium sqlcipher pkg-config cmake
 ```
 
 **Windows (vcpkg):**
 ```powershell
-vcpkg install libsodium sqlite3
+vcpkg install libsodium sqlcipher
 ```
 
 ## Build
@@ -88,7 +89,7 @@ The binary is produced at `build/pwman`.
 pwman init
 ```
 
-Creates a new encrypted database at `~/.pwman/pwman.db` and sets the master password.
+Creates a new encrypted vault at `~/.pwman/pwman.pwv` and sets the master password.
 
 ### Add an entry
 
@@ -124,7 +125,7 @@ Displays the entry in a formatted table after master password verification.
 pwman list
 ```
 
-Shows all entry names (no master password required).
+Shows all entry names. Requires the master password, since the whole database is encrypted.
 
 ### Delete an entry
 

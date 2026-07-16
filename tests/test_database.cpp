@@ -30,12 +30,12 @@ protected:
 };
 
 TEST_F(DatabaseTest, CreateAndOpen) {
-    pwman::Database db(db_path);
+    pwman::Database db(db_path, "testmaster", /*create=*/true);
     EXPECT_FALSE(db.is_initialized());
 }
 
 TEST_F(DatabaseTest, Initialize) {
-    pwman::Database db(db_path);
+    pwman::Database db(db_path, "testmaster", /*create=*/true);
     init_db(db);
     EXPECT_TRUE(db.is_initialized());
 }
@@ -43,12 +43,12 @@ TEST_F(DatabaseTest, Initialize) {
 TEST_F(DatabaseTest, LoadSaltAfterInit) {
     auto dk = pwman::derive_key("testmaster");
     {
-        pwman::Database db(db_path);
+        pwman::Database db(db_path, "testmaster", /*create=*/true);
         auto enc_verify = pwman::encrypt(dk.key, "pwman_verify");
         db.init(dk.salt, enc_verify);
     }
     // Reopen and check salt
-    pwman::Database db2(db_path);
+    pwman::Database db2(db_path, "testmaster");
     auto loaded_salt = db2.load_salt();
     EXPECT_EQ(loaded_salt, dk.salt);
 }
@@ -58,18 +58,18 @@ TEST_F(DatabaseTest, VerifyTokenRoundTrip) {
     auto enc_verify = pwman::encrypt(dk.key, "pwman_verify");
 
     {
-        pwman::Database db(db_path);
+        pwman::Database db(db_path, "testmaster", /*create=*/true);
         db.init(dk.salt, enc_verify);
     }
 
-    pwman::Database db2(db_path);
+    pwman::Database db2(db_path, "testmaster");
     auto loaded_token = db2.load_verify_token();
     auto decrypted = pwman::decrypt(dk.key, loaded_token);
     EXPECT_EQ(decrypted, "pwman_verify");
 }
 
 TEST_F(DatabaseTest, AddAndGetEntry) {
-    pwman::Database db(db_path);
+    pwman::Database db(db_path, "testmaster", /*create=*/true);
     init_db(db);
 
     auto dk = pwman::derive_key("testmaster");
@@ -99,7 +99,7 @@ TEST_F(DatabaseTest, AddAndGetEntry) {
 }
 
 TEST_F(DatabaseTest, GetNonexistentEntry) {
-    pwman::Database db(db_path);
+    pwman::Database db(db_path, "testmaster", /*create=*/true);
     init_db(db);
 
     auto entry = db.get_entry("doesnt_exist");
@@ -107,7 +107,7 @@ TEST_F(DatabaseTest, GetNonexistentEntry) {
 }
 
 TEST_F(DatabaseTest, DuplicateEntryFails) {
-    pwman::Database db(db_path);
+    pwman::Database db(db_path, "testmaster", /*create=*/true);
     init_db(db);
 
     auto dk = pwman::derive_key("testmaster");
@@ -119,7 +119,7 @@ TEST_F(DatabaseTest, DuplicateEntryFails) {
 }
 
 TEST_F(DatabaseTest, ListEntries) {
-    pwman::Database db(db_path);
+    pwman::Database db(db_path, "testmaster", /*create=*/true);
     init_db(db);
 
     auto dk = pwman::derive_key("testmaster");
@@ -139,7 +139,7 @@ TEST_F(DatabaseTest, ListEntries) {
 }
 
 TEST_F(DatabaseTest, DeleteEntry) {
-    pwman::Database db(db_path);
+    pwman::Database db(db_path, "testmaster", /*create=*/true);
     init_db(db);
 
     auto dk = pwman::derive_key("testmaster");
@@ -152,14 +152,14 @@ TEST_F(DatabaseTest, DeleteEntry) {
 }
 
 TEST_F(DatabaseTest, DeleteNonexistentEntry) {
-    pwman::Database db(db_path);
+    pwman::Database db(db_path, "testmaster", /*create=*/true);
     init_db(db);
 
     EXPECT_FALSE(db.delete_entry("nonexistent"));
 }
 
 TEST_F(DatabaseTest, ListEmptyDatabase) {
-    pwman::Database db(db_path);
+    pwman::Database db(db_path, "testmaster", /*create=*/true);
     init_db(db);
 
     auto items = db.list_entries();

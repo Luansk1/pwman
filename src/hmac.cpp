@@ -27,7 +27,10 @@ namespace pwman {
 // Warum nötig? SHA-1 nutzt Rotation statt einfachem Shift,
 // damit keine Bits verloren gehen → bessere Diffusion.
 static inline uint32_t rotate_left(uint32_t value, unsigned int count) {
-    return (value << count) | (value >> (32 - count));
+    // Shifts by 0 or 32 of a uint32_t are undefined behaviour in C++.
+    count &= 31u;
+    if (count == 0) return value;
+    return (value << count) | (value >> (32u - count));
 }
 
 // Big-Endian lesen: SHA-1 arbeitet intern mit Big-Endian,

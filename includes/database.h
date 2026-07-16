@@ -25,10 +25,26 @@ struct Entry {
     std::string notes;
 };
 
+// Custom file extension for pwman vaults. The CLI only accepts database files
+// carrying this suffix; see has_vault_extension().
+inline constexpr const char* kVaultExtension = ".pwv";
+
+// Recognition magic written into the SQLite header (PRAGMA application_id).
+// Spells "PWM1" — lets us confirm a decrypted database really is a pwman vault
+// and not some other SQLCipher database that happened to share the passphrase.
+inline constexpr int kApplicationId = 0x50574D31;
+
+// True if path ends with the pwman vault extension (kVaultExtension).
+bool has_vault_extension(const std::string& path);
+
 class Database {
 public:
-    // Opens or creates the database file.
-    explicit Database(const std::string& path);
+    // Opens (and optionally creates) a SQLCipher-encrypted database file and
+    // unlocks it with master_password. When create is false the file must
+    // already exist and be a valid pwman vault; a wrong password or a foreign
+    // database throws DatabaseError. When create is true a new encrypted file
+    // is provisioned (call init() afterwards to lay down the schema).
+    Database(const std::string& path, const std::string& master_password, bool create = false);
     ~Database();
 
     Database(const Database&) = delete;
@@ -114,6 +130,8 @@ private:
     void exec(const std::string& sql);
     void migrate();  // Run pending schema migrations
     void set_schema_version(int version);
+    void apply_key(const std::string& master_password);  // PRAGMA key
+    void verify_vault();  // confirm passphrase decrypts and magic matches
     std::string path_;
     sqlite3* db_ = nullptr;
 };

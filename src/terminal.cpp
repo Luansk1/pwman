@@ -12,31 +12,46 @@
 
 namespace pwman {
 
+#ifdef _WIN32
+namespace {
+struct EchoGuard {
+    HANDLE handle;
+    DWORD old_mode;
+    bool active = false;
+    EchoGuard() : handle(GetStdHandle(STD_INPUT_HANDLE)) {
+        if (GetConsoleMode(handle, &old_mode)) {
+            SetConsoleMode(handle, old_mode & ~ENABLE_ECHO_INPUT);
+            active = true;
+        }
+    }
+    ~EchoGuard() { if (active) SetConsoleMode(handle, old_mode); }
+};
+}
+#else
+namespace {
+struct EchoGuard {
+    termios old_term{};
+    bool active = false;
+    EchoGuard() {
+        if (tcgetattr(STDIN_FILENO, &old_term) == 0) {
+            termios new_term = old_term;
+            new_term.c_lflag &= ~static_cast<tcflag_t>(ECHO);
+            active = (tcsetattr(STDIN_FILENO, TCSANOW, &new_term) == 0);
+        }
+    }
+    ~EchoGuard() { if (active) tcsetattr(STDIN_FILENO, TCSANOW, &old_term); }
+};
+}
+#endif
+
 std::string read_password(const std::string& prompt) {
     std::cerr << prompt << std::flush;
 
     std::string password;
-
-#ifdef _WIN32
-    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD mode;
-    GetConsoleMode(hStdin, &mode);
-    SetConsoleMode(hStdin, mode & ~ENABLE_ECHO_INPUT);
-
-    std::getline(std::cin, password);
-
-    SetConsoleMode(hStdin, mode);
-#else
-    struct termios old_term, new_term;
-    tcgetattr(STDIN_FILENO, &old_term);
-    new_term = old_term;
-    new_term.c_lflag &= ~static_cast<tcflag_t>(ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
-
-    std::getline(std::cin, password);
-
-    tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
-#endif
+    {
+        EchoGuard guard;
+        std::getline(std::cin, password);
+    }
 
     std::cerr << "\n";
     return password;

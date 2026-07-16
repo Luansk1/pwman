@@ -7,6 +7,7 @@
 #include <shlobj.h>
 #else
 #include <pwd.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -38,7 +39,28 @@ std::vector<uint8_t> blob_to_vec(sqlite3_stmt* stmt, int col) {
     return {data, data + len};
 }
 
+// Escape a passphrase for use inside a single-quoted SQL string literal so it
+// can be passed to `PRAGMA key`. Passwords come from getline() and never carry
+// embedded NULs, so doubling single quotes is sufficient.
+std::string sql_quote(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('\'');
+    for (char c : s) {
+        if (c == '\'') out.push_back('\'');
+        out.push_back(c);
+    }
+    out.push_back('\'');
+    return out;
+}
+
 } // namespace
+
+bool has_vault_extension(const std::string& path) {
+    const std::string ext = kVaultExtension;
+    if (path.size() < ext.size()) return false;
+    return path.compare(path.size() - ext.size(), ext.size(), ext) == 0;
+}
 
 std::string default_db_path() {
     namespace fs = std::filesystem;
@@ -46,15 +68,30 @@ std::string default_db_path() {
     if (!fs::exists(dir)) {
         fs::create_directories(dir);
     }
-    return (dir / "pwman.db").string();
+#ifndef _WIN32
+    ::chmod(dir.c_str(), S_IRWXU);
+#endif
+    return (dir / (std::string("pwman") + kVaultExtension)).string();
 }
 
-Database::Database(const std::string& path) : path_(path) {
+Database::Database(const std::string& path, const std::string& master_password, bool create)
+    : path_(path) {
     namespace fs = std::filesystem;
+
+    const bool existing = fs::exists(path) && fs::file_size(path) > 0;
+    if (!create && !existing) {
+        throw DatabaseError("Database not initialized. Run 'pwman init' first.");
+    }
+
     fs::path parent = fs::path(path).parent_path();
     if (!parent.empty() && !fs::exists(parent)) {
         fs::create_directories(parent);
     }
+#ifndef _WIN32
+    if (!parent.empty()) {
+        ::chmod(parent.c_str(), S_IRWXU);
+    }
+#endif
 
     int rc = sqlite3_open(path.c_str(), &db_);
     if (rc != SQLITE_OK) {
@@ -64,9 +101,76 @@ Database::Database(const std::string& path) : path_(path) {
         throw DatabaseError("Cannot open database: " + err);
     }
 
+#ifndef _WIN32
+    // Restrict permissions on the DB and any SQLite sidecar files (-wal, -shm).
+    ::chmod(path.c_str(), S_IRUSR | S_IWUSR);
+    for (const char* suffix : {"-wal", "-shm", "-journal"}) {
+        std::string side = path + suffix;
+        if (fs::exists(side)) {
+            ::chmod(side.c_str(), S_IRUSR | S_IWUSR);
+        }
+    }
+#endif
+
+    // Supply the SQLCipher passphrase before any read/write. This must happen
+    // before the WAL pragma below, otherwise SQLCipher cannot read the header.
+    apply_key(master_password);
+
+    // For an existing file, confirm the passphrase actually decrypts it and
+    // that the recognition magic marks it as a pwman vault.
+    if (existing) {
+        verify_vault();
+    }
+
     // Enable WAL mode and foreign keys
     exec("PRAGMA journal_mode=WAL;");
     exec("PRAGMA foreign_keys=ON;");
+
+#ifndef _WIN32
+    // WAL mode creates sidecar files on first write — chmod them too.
+    for (const char* suffix : {"-wal", "-shm"}) {
+        std::string side = path + suffix;
+        if (fs::exists(side)) {
+            ::chmod(side.c_str(), S_IRUSR | S_IWUSR);
+        }
+    }
+#endif
+}
+
+void Database::apply_key(const std::string& master_password) {
+    // SQLCipher derives the file-encryption key from this passphrase via
+    // PBKDF2; the KDF salt lives in the (plaintext) first 16 bytes of the file.
+    exec("PRAGMA key = " + sql_quote(master_password) + ";");
+}
+
+void Database::verify_vault() {
+    // The first read after PRAGMA key triggers decryption. A wrong passphrase
+    // (or a non-SQLCipher file) surfaces here as SQLITE_NOTADB.
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT count(*) FROM sqlite_master;";
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_ROW) {
+        throw DatabaseError("Incorrect master password, or not a pwman vault.");
+    }
+
+    // Correct passphrase — now make sure this is really our application's file
+    // and not some other SQLCipher database that shares the passphrase.
+    stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "PRAGMA application_id;", -1, &stmt, nullptr) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW) {
+        int app_id = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+        if (app_id != kApplicationId) {
+            throw DatabaseError("Not a pwman database (recognition magic mismatch).");
+        }
+    } else {
+        sqlite3_finalize(stmt);
+        throw DatabaseError("Failed to read database recognition magic.");
+    }
 }
 
 Database::~Database() {
@@ -86,6 +190,10 @@ void Database::exec(const std::string& sql) {
 }
 
 void Database::init(const std::vector<uint8_t>& salt, const std::vector<uint8_t>& encrypted_verify) {
+    // Stamp the recognition magic into the (encrypted) SQLite header so a
+    // decrypted vault can be positively identified as ours. See kApplicationId.
+    exec("PRAGMA application_id = " + std::to_string(kApplicationId) + ";");
+
     // ── Schema v1: Basis-Tabellen ──
     exec(R"(
         CREATE TABLE IF NOT EXISTS meta (
@@ -341,6 +449,20 @@ void Database::set_totp(int64_t entry_id,
                         const std::string& algorithm,
                         int digits,
                         int period) {
+    if (algorithm != "SHA1" && algorithm != "SHA256" && algorithm != "SHA512") {
+        throw DatabaseError("Invalid TOTP algorithm: " + algorithm);
+    }
+    if (digits < 6 || digits > 8) {
+        throw DatabaseError("Invalid TOTP digits (must be 6, 7, or 8): " +
+                            std::to_string(digits));
+    }
+    if (period <= 0 || period > 600) {
+        throw DatabaseError("Invalid TOTP period: " + std::to_string(period));
+    }
+    if (enc_secret.empty()) {
+        throw DatabaseError("Refusing to store empty TOTP secret");
+    }
+
     // INSERT OR REPLACE: Wenn der Entry schon TOTP hat, wird es ersetzt
     sqlite3_stmt* stmt = nullptr;
     const char* sql = R"(

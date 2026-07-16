@@ -1,5 +1,5 @@
 #include "base32.h"
-#include <iostream>
+
 #include <algorithm>
 #include <cctype>
 
@@ -50,16 +50,18 @@ namespace pwman {
     bool base32_validate(const std::string& input ){
         std::string normalized = base32_normalize(input);
 
+        if (normalized.empty()){
+            return false;
+        }
 
-        bool is_padding = false; 
-        size_t data_len = 0; 
+        bool is_padding = false;
+        size_t data_len = 0;
 
         for (size_t i = 0; i< normalized.size(); ++i){
             uint8_t val = DECODE_TABLE.values[static_cast<unsigned char>(normalized[i])];
-            std::cout << "Char: '" << normalized[i] << "' -> Val: " << static_cast<int>(val) << std::endl;
-            
+
             if (val == INVALID){
-                return false; 
+                return false;
             }
 
             if (val == PADDING){
