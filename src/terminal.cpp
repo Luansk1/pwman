@@ -1,4 +1,5 @@
 #include "terminal.h"
+#include <cstdio>
 #include <iostream>
 #include <algorithm>
 #include <numeric>
@@ -11,6 +12,26 @@
 #endif
 
 namespace pwman {
+
+void copy_to_clipboard(const std::string& text) {
+#ifdef __APPLE__
+    FILE* p = popen("pbcopy", "w");
+#elif defined(_WIN32)
+    FILE* p = _popen("clip", "w");
+#else
+    FILE* p = popen(
+        "command -v wl-copy >/dev/null 2>&1 && wl-copy"
+        " || xclip -selection clipboard 2>/dev/null"
+        " || xsel --clipboard --input 2>/dev/null", "w");
+#endif
+    if (!p) return;
+    std::fwrite(text.data(), 1, text.size(), p);
+#ifdef _WIN32
+    _pclose(p);
+#else
+    pclose(p);
+#endif
+}
 
 #ifdef _WIN32
 namespace {

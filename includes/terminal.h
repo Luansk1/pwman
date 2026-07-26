@@ -29,4 +29,9 @@ void print_totp_code(const std::string& name,
                      int remaining_seconds,
                      int period);
 
+// Copy text to the system clipboard (pbcopy / clip / wl-copy|xclip|xsel).
+// Passing an empty string clears the clipboard. Best-effort: silently does
+// nothing if no clipboard tool is available.
+void copy_to_clipboard(const std::string& text);
+
 } // namespace pwman

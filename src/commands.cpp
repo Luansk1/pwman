@@ -1,6 +1,7 @@
 #include "commands.h"
 #include "crypto.h"
 #include "database.h"
+#include "list_ui.h"
 #include "terminal.h"
 #include "totp.h"
 
@@ -9,16 +10,23 @@
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #include <conio.h>
 #include <windows.h>
 #else
 #include <sys/select.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -84,26 +92,6 @@ std::unique_ptr<Database> open_vault(const std::string& db_path, std::string& ma
     }
 }
 
-void copy_to_clipboard(const std::string& text) {
-#ifdef __APPLE__
-    FILE* p = popen("pbcopy", "w");
-#elif defined(_WIN32)
-    FILE* p = _popen("clip", "w");
-#else
-    FILE* p = popen(
-        "command -v wl-copy >/dev/null 2>&1 && wl-copy"
-        " || xclip -selection clipboard 2>/dev/null"
-        " || xsel --clipboard --input 2>/dev/null", "w");
-#endif
-    if (!p) return;
-    std::fwrite(text.data(), 1, text.size(), p);
-#ifdef _WIN32
-    _pclose(p);
-#else
-    pclose(p);
-#endif
-}
-
 volatile std::sig_atomic_t g_totp_interrupt = 0;
 void totp_on_sigint(int) { g_totp_interrupt = 1; }
 
@@ -141,6 +129,16 @@ void live_totp_display(const std::string& name,
                        int digits,
                        int period) {
 #ifndef _WIN32
+    // Non-interactive stdin (piped/scripted input): print a single code and
+    // return rather than entering the live loop, which reads stdin in raw mode
+    // and would otherwise spin forever once the pipe reaches EOF.
+    if (!isatty(STDIN_FILENO)) {
+        std::string code = totp_generate(raw_secret, algo, digits, period);
+        print_totp_code(name, code, totp_remaining_seconds(period), period);
+        secure_zero(code);
+        return;
+    }
+
     RawModeGuard raw_guard;
     SigintGuard sig_guard(totp_on_sigint);
 #endif
@@ -356,23 +354,50 @@ int cmd_get(const std::string& db_path, const std::string& name) {
 int cmd_list(const std::string& db_path) {
     std::string master;
     auto db = open_vault(db_path, master);
+    auto dk = derive_field_key(*db, master);
     secure_zero(master);
 
     auto items = db->list_entries();
-
     if (items.empty()) {
+        secure_zero(dk.key);
         print_info("No entries found.");
         return 0;
     }
 
-    std::vector<std::vector<std::string>> rows;
+    // Decrypt each entry (and its TOTP secret, if any) so the UI can show the
+    // masked password and a live TOTP code. Secrets are wiped after the UI.
+    std::vector<VaultRow> rows;
     rows.reserve(items.size());
     for (const auto& item : items) {
-        rows.push_back({std::to_string(item.id), item.name});
-    }
+        auto entry = db->get_entry(item.name);
+        if (!entry.has_value()) continue;
 
-    print_table({"ID", "Name"}, rows);
-    print_info(std::to_string(items.size()) + " entries total.");
+        VaultRow row;
+        row.name = item.name;
+        row.username = decrypt(dk.key, entry->enc_username);
+        row.password = decrypt(dk.key, entry->enc_password);
+
+        auto totp = db->get_totp(item.name);
+        if (totp.has_value()) {
+            std::string secret_b32 = decrypt(dk.key, totp->enc_secret);
+            row.totp_secret = base32_decode(secret_b32);
+            secure_zero(secret_b32);
+            row.totp_algo = string_to_algorithm(totp->algorithm);
+            row.totp_digits = totp->digits;
+            row.totp_period = totp->period;
+            row.has_totp = true;
+        }
+        rows.push_back(std::move(row));
+    }
+    secure_zero(dk.key);
+
+    run_list_ui(rows);
+
+    for (auto& r : rows) {
+        secure_zero(r.username);
+        secure_zero(r.password);
+        secure_zero(r.totp_secret);
+    }
     return 0;
 }
 
