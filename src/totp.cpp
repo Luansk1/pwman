@@ -57,10 +57,22 @@ namespace pwman {
                         (static_cast<uint32_t>(mac[offset + 3]));
 
         code &= 0x7FFFFFFF; // Remove the sign bit
-        code %= static_cast<uint32_t>(std::pow(10, digits)); // Modulo to get the correct number of digits  
 
-        return std::to_string(code);
+        // Integer power of ten (std::pow uses doubles and can be off by one for
+        // large exponents, which would corrupt the modulo).
+        uint32_t modulo = 1;
+        for (int i = 0; i < digits; ++i) modulo *= 10;
+        code %= modulo;
 
+        // Zero-pad on the LEFT to exactly `digits` characters. Without this a
+        // code like 048290 would print as "48290" (a lost leading zero) and a
+        // code like 123400 must keep its trailing zeros — std::to_string alone
+        // drops the leading ones. RFC 6238 requires a fixed-width, padded code.
+        std::string out = std::to_string(code);
+        if (static_cast<int>(out.size()) < digits) {
+            out.insert(out.begin(), digits - out.size(), '0');
+        }
+        return out;
     }
 
     int totp_remaining_seconds(int period){
