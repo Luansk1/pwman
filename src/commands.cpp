@@ -449,8 +449,12 @@ void print_usage(const std::string& program) {
               << "  " << program << " del <name>            Delete an entry\n"
               << "  " << program << " totp [add|del] <name> Manage TOTP for an entry\n"
               << "  " << program << " gen [length]          Generate a random password\n"
+              << "  " << program << " export [xml] [path]   Export all entries to a CSV (or XML) file\n"
+              << "  " << program << " import <file.csv>     Import entries from a CSV file\n"
+              << "  " << program << " config [db <path>]    Show or set the default database path\n"
               << "\nOptions:\n"
-              << "  --db <path>          Use a custom database path\n"
+              << "  --db <path>          Use a custom database path (overrides the configured default)\n"
+              << "  --version, -v        Show the version\n"
               << "  --help, -h           Show this help message\n";
 }
 
@@ -591,6 +595,484 @@ int cmd_totp(const std::string& db_path, const std::string& entry_name) {
     secure_zero(raw_secret);
 
     return 0;
+}
+
+namespace {
+
+// One fully-decrypted entry, used only while building an export.
+struct ExportRow {
+    std::string name, username, password, url, notes;
+    bool has_totp = false;
+    std::string totp_secret;      // Base32
+    std::string totp_algorithm;
+    int totp_digits = 0;
+    int totp_period = 0;
+};
+
+// RFC 4180 CSV field: quote it when it contains a comma, quote or newline, and
+// double any embedded quotes.
+std::string csv_escape(const std::string& s) {
+    if (s.find_first_of(",\"\n\r") == std::string::npos) return s;
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"') out += "\"\"";
+        else out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+std::string xml_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '&':  out += "&amp;";  break;
+            case '<':  out += "&lt;";   break;
+            case '>':  out += "&gt;";   break;
+            case '"':  out += "&quot;"; break;
+            case '\'': out += "&apos;"; break;
+            default:   out += c;
+        }
+    }
+    return out;
+}
+
+std::string build_csv(const std::vector<ExportRow>& rows) {
+    std::string out =
+        "name,username,password,url,notes,totp_secret,totp_algorithm,totp_digits,totp_period\n";
+    for (const auto& r : rows) {
+        out += csv_escape(r.name)     + ",";
+        out += csv_escape(r.username) + ",";
+        out += csv_escape(r.password) + ",";
+        out += csv_escape(r.url)      + ",";
+        out += csv_escape(r.notes)    + ",";
+        if (r.has_totp) {
+            out += csv_escape(r.totp_secret)    + ",";
+            out += csv_escape(r.totp_algorithm) + ",";
+            out += std::to_string(r.totp_digits) + ",";
+            out += std::to_string(r.totp_period);
+        } else {
+            out += ",,,";
+        }
+        out += "\n";
+    }
+    return out;
+}
+
+std::string build_xml(const std::vector<ExportRow>& rows) {
+    std::string out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<pwman-export>\n";
+    for (const auto& r : rows) {
+        out += "  <entry>\n";
+        out += "    <name>" + xml_escape(r.name) + "</name>\n";
+        out += "    <username>" + xml_escape(r.username) + "</username>\n";
+        out += "    <password>" + xml_escape(r.password) + "</password>\n";
+        out += "    <url>" + xml_escape(r.url) + "</url>\n";
+        out += "    <notes>" + xml_escape(r.notes) + "</notes>\n";
+        if (r.has_totp) {
+            out += "    <totp secret=\"" + xml_escape(r.totp_secret) +
+                   "\" algorithm=\"" + xml_escape(r.totp_algorithm) +
+                   "\" digits=\"" + std::to_string(r.totp_digits) +
+                   "\" period=\"" + std::to_string(r.totp_period) + "\"/>\n";
+        }
+        out += "  </entry>\n";
+    }
+    out += "</pwman-export>\n";
+    return out;
+}
+
+} // namespace
+
+int cmd_export(const std::string& db_path, const std::string& format,
+               const std::string& out_path_arg) {
+    const bool xml = (format == "xml");
+
+    std::string master;
+    auto db = open_vault(db_path, master);
+    auto dk = derive_field_key(*db, master);
+    secure_zero(master);
+
+    auto items = db->list_entries();
+    if (items.empty()) {
+        secure_zero(dk.key);
+        print_info("No entries found; nothing to export.");
+        return 0;
+    }
+
+    // Decrypt every entry (and its TOTP config, if any) into export rows.
+    std::vector<ExportRow> rows;
+    rows.reserve(items.size());
+    for (const auto& item : items) {
+        auto entry = db->get_entry(item.name);
+        if (!entry.has_value()) continue;
+
+        ExportRow r;
+        r.name = item.name;
+        r.username = decrypt(dk.key, entry->enc_username);
+        r.password = decrypt(dk.key, entry->enc_password);
+        r.url = decrypt(dk.key, entry->enc_url);
+        r.notes = decrypt(dk.key, entry->enc_notes);
+
+        auto totp = db->get_totp(item.name);
+        if (totp.has_value()) {
+            r.totp_secret = decrypt(dk.key, totp->enc_secret);
+            r.totp_algorithm = totp->algorithm;
+            r.totp_digits = totp->digits;
+            r.totp_period = totp->period;
+            r.has_totp = true;
+        }
+        rows.push_back(std::move(r));
+    }
+    secure_zero(dk.key);
+
+    std::string out_path = out_path_arg;
+    if (out_path.empty()) {
+        out_path = std::string("pwman-export.") + (xml ? "xml" : "csv");
+    }
+
+    std::string content = xml ? build_xml(rows) : build_csv(rows);
+
+    // Wipe the decrypted secrets we no longer need (the file itself will hold
+    // them in plaintext — that is the nature of an export).
+    for (auto& r : rows) {
+        secure_zero(r.username);
+        secure_zero(r.password);
+        secure_zero(r.url);
+        secure_zero(r.notes);
+        secure_zero(r.totp_secret);
+    }
+
+    // Create the file and lock its permissions down *before* writing secrets.
+    { std::ofstream create(out_path, std::ios::binary | std::ios::trunc); }
+#ifndef _WIN32
+    ::chmod(out_path.c_str(), S_IRUSR | S_IWUSR);
+#endif
+    std::ofstream ofs(out_path, std::ios::binary | std::ios::trunc);
+    if (!ofs) {
+        secure_zero(content);
+        print_error("Cannot open output file: " + out_path);
+        return 1;
+    }
+    ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
+    ofs.close();
+    secure_zero(content);
+
+    print_success("Exported " + std::to_string(rows.size()) + " entries to " +
+                  out_path + " (" + (xml ? "XML" : "CSV") + ").");
+    print_info("Warning: this file contains your passwords in PLAINTEXT. "
+               "Store it securely or delete it after use.");
+    return 0;
+}
+
+namespace {
+
+// Parse RFC 4180 CSV text into rows of fields. Handles quoted fields, escaped
+// quotes ("") and commas/newlines inside quotes; accepts LF and CRLF line ends.
+std::vector<std::vector<std::string>> parse_csv(const std::string& text) {
+    std::vector<std::vector<std::string>> rows;
+    std::vector<std::string> row;
+    std::string field;
+    bool in_quotes = false;
+    bool row_started = false;  // did we see any field content/separator on this line?
+
+    auto end_field = [&]() { row.push_back(std::move(field)); field.clear(); };
+    auto end_row = [&]() {
+        end_field();
+        rows.push_back(std::move(row));
+        row.clear();
+        row_started = false;
+    };
+
+    for (size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        if (in_quotes) {
+            if (c == '"') {
+                if (i + 1 < text.size() && text[i + 1] == '"') { field += '"'; ++i; }
+                else in_quotes = false;
+            } else {
+                field += c;
+            }
+            continue;
+        }
+        switch (c) {
+            case '"':  in_quotes = true; row_started = true; break;
+            case ',':  end_field(); row_started = true; break;
+            case '\r': break;  // swallow CR (CRLF handled by the LF)
+            case '\n': end_row(); break;
+            default:   field += c; row_started = true; break;
+        }
+    }
+    // Flush a final row that wasn't newline-terminated.
+    if (row_started || !field.empty() || !row.empty()) end_row();
+    return rows;
+}
+
+std::string to_lower_copy(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+std::string to_upper_copy(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return s;
+}
+std::string trim_copy(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t");
+    if (a == std::string::npos) return "";
+    size_t b = s.find_last_not_of(" \t");
+    return s.substr(a, b - a + 1);
+}
+int parse_int_or(const std::string& s, int fallback) {
+    try { return std::stoi(s); } catch (...) { return fallback; }
+}
+
+// Interpret the value of a TOTP column, which may be a raw Base32 secret or a
+// full otpauth:// URI (as exported by KeePassXC and others). Fills secret and,
+// for a URI, any algorithm/digits/period query parameters it carries. Returns
+// false when no secret can be found.
+bool parse_totp_field(const std::string& value, std::string& secret,
+                      std::string& algorithm, int& digits, int& period) {
+    if (value.rfind("otpauth://", 0) != 0) {
+        secret = value;
+        return !secret.empty();
+    }
+
+    auto qpos = value.find('?');
+    if (qpos == std::string::npos) return false;
+    std::string query = value.substr(qpos + 1);
+    for (size_t i = 0; i < query.size();) {
+        size_t amp = query.find('&', i);
+        std::string pair = query.substr(i, amp == std::string::npos ? amp : amp - i);
+        auto eq = pair.find('=');
+        if (eq != std::string::npos) {
+            std::string key = to_lower_copy(pair.substr(0, eq));
+            std::string val = pair.substr(eq + 1);
+            if (key == "secret") secret = val;
+            else if (key == "algorithm") algorithm = to_upper_copy(val);
+            else if (key == "digits") digits = parse_int_or(val, digits);
+            else if (key == "period") period = parse_int_or(val, period);
+        }
+        if (amp == std::string::npos) break;
+        i = amp + 1;
+    }
+    return !secret.empty();
+}
+
+} // namespace
+
+int cmd_import(const std::string& db_path, const std::string& in_path) {
+    namespace fs = std::filesystem;
+    if (!fs::exists(in_path)) {
+        print_error("File not found: " + in_path);
+        return 1;
+    }
+
+    std::ifstream ifs(in_path, std::ios::binary);
+    if (!ifs) {
+        print_error("Cannot open file: " + in_path);
+        return 1;
+    }
+    std::string content((std::istreambuf_iterator<char>(ifs)),
+                        std::istreambuf_iterator<char>());
+    ifs.close();
+
+    auto rows = parse_csv(content);
+    secure_zero(content);
+    if (rows.empty()) {
+        print_info("No rows found in " + in_path);
+        return 0;
+    }
+
+    // Column titles recognised in a header row. Covers the common layout used by
+    // KeePassXC and most password managers (Title, Username, Password, URL,
+    // Notes, TOTP) as well as pwman's own export columns.
+    static const std::set<std::string> known_columns = {
+        "title", "name", "username", "password", "url", "notes", "totp",
+        "totp_secret", "totp_algorithm", "totp_digits", "totp_period"};
+
+    std::map<std::string, int> col;
+    size_t data_start = 0;
+    {
+        const auto& first = rows[0];
+        bool has_header = false;
+        for (const auto& c : first) {
+            if (known_columns.count(to_lower_copy(trim_copy(c)))) has_header = true;
+        }
+        if (has_header) {
+            for (int i = 0; i < static_cast<int>(first.size()); ++i) {
+                col[to_lower_copy(trim_copy(first[i]))] = i;
+            }
+            data_start = 1;
+        } else {
+            // Headerless files are read in pwman's own export column order.
+            const char* order[] = {"name", "username", "password", "url", "notes",
+                                    "totp_secret", "totp_algorithm", "totp_digits",
+                                    "totp_period"};
+            for (int i = 0; i < 9; ++i) col[order[i]] = i;
+        }
+    }
+    auto field = [&](const std::vector<std::string>& r, const char* key) -> std::string {
+        auto it = col.find(key);
+        if (it == col.end() || it->second < 0 ||
+            it->second >= static_cast<int>(r.size())) {
+            return "";
+        }
+        return r[it->second];
+    };
+    // First non-empty value among several accepted column names (aliases).
+    auto field_alias = [&](const std::vector<std::string>& r,
+                           std::initializer_list<const char*> keys) -> std::string {
+        for (const char* k : keys) {
+            std::string v = field(r, k);
+            if (!v.empty()) return v;
+        }
+        return "";
+    };
+
+    if (col.find("title") == col.end() && col.find("name") == col.end()) {
+        print_error("CSV has no 'Title'/'name' column; cannot import.");
+        return 1;
+    }
+
+    std::string master;
+    auto db = open_vault(db_path, master);
+    auto dk = derive_field_key(*db, master);
+    secure_zero(master);
+
+    int imported = 0, skipped = 0, failed = 0, totp_added = 0;
+    for (size_t r = data_start; r < rows.size(); ++r) {
+        std::string name = field_alias(rows[r], {"title", "name"});
+        if (name.empty()) {
+            // Ignore fully blank lines silently; count other nameless rows.
+            if (!(rows[r].size() == 1 && rows[r][0].empty())) ++failed;
+            continue;
+        }
+        if (db->get_entry(name).has_value()) {
+            ++skipped;
+            continue;
+        }
+
+        std::string username = field(rows[r], "username");
+        std::string password = field(rows[r], "password");
+        std::string url = field(rows[r], "url");
+        std::string notes = field(rows[r], "notes");
+
+        int64_t id = 0;
+        try {
+            id = db->add_entry(name,
+                               encrypt(dk.key, username),
+                               encrypt(dk.key, password),
+                               encrypt(dk.key, url),
+                               encrypt(dk.key, notes));
+            ++imported;
+        } catch (const DatabaseError& e) {
+            ++failed;
+            print_error("Skipping '" + name + "': " + e.what());
+        }
+
+        std::string totp_value = field_alias(rows[r], {"totp", "totp_secret"});
+        if (id != 0 && !totp_value.empty()) {
+            std::string secret;
+            std::string algo = to_upper_copy(field(rows[r], "totp_algorithm"));
+            int digits = parse_int_or(field(rows[r], "totp_digits"), 6);
+            int period = parse_int_or(field(rows[r], "totp_period"), 30);
+
+            parse_totp_field(totp_value, secret, algo, digits, period);
+            std::string norm = base32_normalize(secret);
+            if (base32_validate(norm)) {
+                if (algo.empty()) algo = "SHA1";
+                try {
+                    db->set_totp(id, encrypt(dk.key, norm), algo, digits, period);
+                    ++totp_added;
+                } catch (const std::exception& e) {
+                    print_error("TOTP for '" + name + "' skipped: " + e.what());
+                }
+            } else {
+                print_error("TOTP for '" + name + "' skipped: invalid secret.");
+            }
+            secure_zero(secret);
+            secure_zero(norm);
+            secure_zero(totp_value);
+        }
+
+        secure_zero(username);
+        secure_zero(password);
+        secure_zero(url);
+        secure_zero(notes);
+    }
+
+    secure_zero(dk.key);
+    for (auto& row : rows) {
+        for (auto& c : row) secure_zero(c);
+    }
+
+    print_success("Imported " + std::to_string(imported) + " entries (" +
+                  std::to_string(totp_added) + " with TOTP).");
+    if (skipped > 0) {
+        print_info(std::to_string(skipped) +
+                   " skipped (an entry with that name already exists).");
+    }
+    if (failed > 0) {
+        print_info(std::to_string(failed) + " rows could not be imported.");
+    }
+    return 0;
+}
+
+int cmd_config(const std::vector<std::string>& args) {
+    namespace fs = std::filesystem;
+
+    // `config` / `config show`: report the effective configuration.
+    if (args.empty() || args[0] == "show" || args[0] == "get") {
+        print_info("Config file:   " + config_file_path());
+
+        auto stored = stored_db_path();
+        std::cout << "Stored db:     "
+                  << (stored ? *stored : std::string("(none)")) << "\n";
+
+        const char* env = std::getenv("PWMAN_DB");
+        std::cout << "PWMAN_DB env:  "
+                  << (env && env[0] ? env : "(unset)") << "\n";
+
+        std::cout << "Effective db:  " << configured_db_path() << "\n";
+        print_info("Override for a single command with '--db <path>'. "
+                   "Priority: --db > PWMAN_DB > config file > default.");
+        return 0;
+    }
+
+    // `config db <path>` / `config set-db <path>`: persist the default.
+    if (args[0] == "db" || args[0] == "set-db" || args[0] == "set") {
+        if (args.size() < 2) {
+            print_error("Usage: pwman config db <path-to-vault" +
+                        std::string(kVaultExtension) + ">");
+            return 1;
+        }
+        const std::string& path = args[1];
+        if (!has_vault_extension(path)) {
+            print_error("Database file must use the '" +
+                        std::string(kVaultExtension) + "' extension: " + path);
+            return 1;
+        }
+        set_stored_db_path(path);
+        print_success("Default database set to: " + configured_db_path());
+        if (std::getenv("PWMAN_DB")) {
+            print_info("Note: PWMAN_DB is set and overrides the config file.");
+        }
+        if (!fs::exists(path)) {
+            print_info("That file does not exist yet — run 'pwman init' to create it.");
+        }
+        return 0;
+    }
+
+    // `config clear` / `config unset`: forget the stored default.
+    if (args[0] == "clear" || args[0] == "unset") {
+        std::error_code ec;
+        fs::remove(config_file_path(), ec);
+        print_success("Cleared stored default database path.");
+        return 0;
+    }
+
+    print_error("Unknown config subcommand: " + args[0]);
+    print_info("Usage: pwman config [show | db <path> | clear]");
+    return 1;
 }
 
 } // namespace pwman

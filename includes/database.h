@@ -136,7 +136,22 @@ private:
     sqlite3* db_ = nullptr;
 };
 
-// Returns the default database path (~/.pwman/pwman.db).
+// Returns the built-in default database path (~/.pwman/pwman.pwv).
 std::string default_db_path();
+
+// Path to the pwman config file (~/.pwman/config).
+std::string config_file_path();
+
+// The default database path a bare `pwman <cmd>` (no --db) should use, resolved
+// in priority order: the PWMAN_DB environment variable, then the `db=` line in
+// the config file, then default_db_path().
+std::string configured_db_path();
+
+// The database path stored in the config file, if any (env var is ignored).
+std::optional<std::string> stored_db_path();
+
+// Persist `path` as the default database in the config file. A leading "~/" is
+// expanded to the home directory. Throws DatabaseError on I/O failure.
+void set_stored_db_path(const std::string& path);
 
 } // namespace pwman

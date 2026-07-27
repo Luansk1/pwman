@@ -26,13 +26,15 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> args(argv, argv + argc);
     std::string program = args.empty() ? "pwman" : args[0];
 
-    std::string db_path = pwman::default_db_path();
+    std::string db_path;
+    bool db_explicit = false;  // was --db given on the command line?
     std::string command;
     std::vector<std::string> cmd_args;
 
     for (size_t i = 1; i < args.size(); ++i) {
         if (args[i] == "--db" && i + 1 < args.size()) {
             db_path = args[++i];
+            db_explicit = true;
         } else if (args[i] == "--help" || args[i] == "-h") {
             pwman::print_usage(program);
             return 0;
@@ -46,6 +48,17 @@ int main(int argc, char* argv[]) {
     if (command.empty()) {
         pwman::print_usage(program);
         return 1;
+    }
+
+    // Resolve the default database path (PWMAN_DB env / config file / built-in)
+    // unless --db was given explicitly, which always wins.
+    if (!db_explicit) {
+        db_path = pwman::configured_db_path();
+    }
+
+    // `config` manages the stored default path and touches no database.
+    if (command == "config") {
+        return pwman::cmd_config(cmd_args);
     }
 
     // Enforce the custom vault extension for every command that touches the
@@ -98,7 +111,22 @@ int main(int argc, char* argv[]) {
             } 
             
             return pwman::cmd_totp(db_path, cmd_args[0]); 
-        } else {
+        }else if (command == "export"){
+            std::string format = "csv";
+            std::string out_path;
+            for (const auto& a : cmd_args) {
+                if (a == "xml" || a == "--xml") format = "xml";
+                else if (a == "csv" || a == "--csv") format = "csv";
+                else out_path = a;  // anything else is the output path
+            }
+            return pwman::cmd_export(db_path, format, out_path);
+        }else if (command == "import"){
+            if (cmd_args.empty()) {
+                pwman::print_error("Usage: " + program + " import <file.csv>");
+                return 1;
+            }
+            return pwman::cmd_import(db_path, cmd_args[0]);
+        }else {
             pwman::print_error("Unknown command: " + command);
             pwman::print_usage(program);
             return 1;

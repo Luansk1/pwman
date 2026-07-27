@@ -2,6 +2,7 @@
 #include <sqlite3.h>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 
 #ifdef _WIN32
 #include <shlobj.h>
@@ -72,6 +73,67 @@ std::string default_db_path() {
     ::chmod(dir.c_str(), S_IRWXU);
 #endif
     return (dir / (std::string("pwman") + kVaultExtension)).string();
+}
+
+std::string config_file_path() {
+    namespace fs = std::filesystem;
+    return (fs::path(get_home_dir()) / ".pwman" / "config").string();
+}
+
+std::optional<std::string> stored_db_path() {
+    std::ifstream in(config_file_path());
+    if (!in) return std::nullopt;
+    std::string line;
+    while (std::getline(in, line)) {
+        // Skip blanks and comments; parse `db=<path>`.
+        if (line.empty() || line[0] == '#') continue;
+        const std::string key = "db=";
+        if (line.rfind(key, 0) == 0) {
+            std::string value = line.substr(key.size());
+            if (!value.empty()) return value;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string configured_db_path() {
+    if (const char* env = std::getenv("PWMAN_DB")) {
+        if (env[0] != '\0') return env;
+    }
+    if (auto stored = stored_db_path()) {
+        return *stored;
+    }
+    return default_db_path();
+}
+
+void set_stored_db_path(const std::string& path) {
+    namespace fs = std::filesystem;
+
+    // Expand a leading "~/" to the home directory.
+    std::string expanded = path;
+    if (expanded.rfind("~/", 0) == 0) {
+        expanded = (fs::path(get_home_dir()) / expanded.substr(2)).string();
+    }
+
+    fs::path dir = fs::path(get_home_dir()) / ".pwman";
+    if (!fs::exists(dir)) {
+        fs::create_directories(dir);
+    }
+#ifndef _WIN32
+    ::chmod(dir.c_str(), S_IRWXU);
+#endif
+
+    const std::string cfg = config_file_path();
+    std::ofstream out(cfg, std::ios::trunc);
+    if (!out) {
+        throw DatabaseError("Cannot write config file: " + cfg);
+    }
+    out << "# pwman configuration\n";
+    out << "db=" << expanded << "\n";
+    out.close();
+#ifndef _WIN32
+    ::chmod(cfg.c_str(), S_IRUSR | S_IWUSR);
+#endif
 }
 
 Database::Database(const std::string& path, const std::string& master_password, bool create)
