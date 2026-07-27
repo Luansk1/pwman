@@ -13,7 +13,11 @@
 #include <vector>
 #include <chrono>
 
-using namespace pwman; 
+#ifndef PWMAN_VERSION
+#define PWMAN_VERSION "unknown"
+#endif
+
+using namespace pwman;
 
 int main(int argc, char* argv[]) {
     try {
@@ -37,6 +41,9 @@ int main(int argc, char* argv[]) {
             db_explicit = true;
         } else if (args[i] == "--help" || args[i] == "-h") {
             pwman::print_usage(program);
+            return 0;
+        } else if (args[i] == "--version" || args[i] == "-v") {
+            std::cout << "pwman " << PWMAN_VERSION << "\n";
             return 0;
         } else if (command.empty()) {
             command = args[i];

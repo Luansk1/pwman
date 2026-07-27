@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(pwman VERSION 1.0.0 LANGUAGES CXX)
+project(pwman VERSION 2.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,6 +45,7 @@ target_link_libraries(pwman_lib PRIVATE ftxui::screen ftxui::dom ftxui::componen
 # Executable
 add_executable(pwman src/main.cpp)
 target_link_libraries(pwman PRIVATE pwman_lib)
+target_compile_definitions(pwman PRIVATE PWMAN_VERSION="${PROJECT_VERSION}")
 
 # Install rule: `cmake --install build` copies the binary into <prefix>/bin.
 # Override the prefix with e.g. `cmake --install build --prefix /opt/homebrew`.
