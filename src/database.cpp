@@ -256,7 +256,6 @@ void Database::init(const std::vector<uint8_t>& salt, const std::vector<uint8_t>
     // decrypted vault can be positively identified as ours. See kApplicationId.
     exec("PRAGMA application_id = " + std::to_string(kApplicationId) + ";");
 
-    // ── Schema v1: Basis-Tabellen ──
     exec(R"(
         CREATE TABLE IF NOT EXISTS meta (
             key   TEXT PRIMARY KEY,
@@ -276,15 +275,12 @@ void Database::init(const std::vector<uint8_t>& salt, const std::vector<uint8_t>
         );
     )");
 
-    // Setze initiale Schema-Version und führe Migrationen aus
     set_schema_version(1);
     migrate();
 
-    // Store salt and verify token
     sqlite3_stmt* stmt = nullptr;
     const char* sql = "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?);";
 
-    // Salt
     sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, "salt", -1, SQLITE_STATIC);
     sqlite3_bind_blob(stmt, 2, salt.data(), static_cast<int>(salt.size()), SQLITE_STATIC);
@@ -294,7 +290,6 @@ void Database::init(const std::vector<uint8_t>& salt, const std::vector<uint8_t>
     }
     sqlite3_finalize(stmt);
 
-    // Verify token
     sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, "verify", -1, SQLITE_STATIC);
     sqlite3_bind_blob(stmt, 2, encrypted_verify.data(),
@@ -315,8 +310,8 @@ bool Database::is_initialized() const {
     bool found = (sqlite3_step(stmt) == SQLITE_ROW);
     sqlite3_finalize(stmt);
 
-    // Bestehende DB? Migrationen ausführen (const_cast ist OK,
-    // weil migrate() nur Schema ändert, nicht den logischen Zustand)
+    // Migrate an existing DB forward. const_cast is safe: migrate() only
+    // touches the schema, not the logical state.
     if (found) {
         const_cast<Database*>(this)->migrate();
     }
@@ -483,7 +478,7 @@ void Database::set_schema_version(int version) {
 void Database::migrate() {
     int current = schema_version();
 
-    // v1 → v2: TOTP-Tabelle hinzufügen
+    // v1 -> v2: add the TOTP table.
     if (current < 2) {
         exec(R"(
             CREATE TABLE IF NOT EXISTS totp_entries (
@@ -499,12 +494,7 @@ void Database::migrate() {
         )");
         set_schema_version(2);
     }
-
-    // Zukünftige Migrationen:
-    // if (current < 3) { ... set_schema_version(3); }
 }
-
-// ── TOTP CRUD ─────────────────────────────────────────────
 
 void Database::set_totp(int64_t entry_id,
                         const std::vector<uint8_t>& enc_secret,
@@ -525,7 +515,6 @@ void Database::set_totp(int64_t entry_id,
         throw DatabaseError("Refusing to store empty TOTP secret");
     }
 
-    // INSERT OR REPLACE: Wenn der Entry schon TOTP hat, wird es ersetzt
     sqlite3_stmt* stmt = nullptr;
     const char* sql = R"(
         INSERT OR REPLACE INTO totp_entries (entry_id, enc_secret, algorithm, digits, period)
