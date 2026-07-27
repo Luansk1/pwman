@@ -42,10 +42,19 @@
 
 .claude/
 build/
+build-cov/
 .idea/
 .vscode/
 cmake-build-debug/
 cmake-build-release/
+
+# Coverage artifacts
+*.profraw
+*.profdata
+
+# Local exports / test vaults
+pwman-export.*
+*.pwv
 
 # macOS
 .DS_Store
