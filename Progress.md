@@ -7,6 +7,82 @@ encrypted at rest with **SQLCipher**, with XChaCha20-Poly1305 (libsodium) field 
 layered on top, all protected by a single Argon2id-derived master password. Includes
 RFC 6238 TOTP (2FA) support with a live, self-updating code display.
 
+## Latest Change — CSV import (2026-07-25)
+
+- **`cmd_import`** (`commands.cpp`): `pwman import <file.csv>` reads the CSV export format
+  and adds entries. Includes a from-scratch RFC 4180 parser (`parse_csv`) handling quoted
+  fields, escaped `""`, and embedded commas/newlines.
+- **Column mapping**: header-based when the first row has `name`/`password` (columns may be
+  a subset or reordered; only `name` required), else positional in export order.
+- **TOTP**: a non-empty `totp_secret` (validated Base32) is attached with
+  `totp_algorithm`/`digits`/`period` (defaults SHA1/6/30); invalid secrets skipped w/ warning.
+- **Duplicates skipped** (name already exists); prints imported/with-TOTP/skipped/failed
+  counts. Decrypted CSV content and row cells `secure_zero`'d after import.
+- Wired in `main.cpp` + `commands.h` + usage text. Verified: export→import→re-export diff is
+  **identical** (lossless, incl. TOTP and quoted fields); re-import skips all as duplicates;
+  subset/positional/embedded-newline cases and missing-file error all pass. 88 tests pass.
+- Docs updated (`docs/usage.md`, `docs/export.md` import section, README).
+
+## Latest Change — export, config, and documentation (2026-07-21)
+
+- **Export** (`cmd_export`, `commands.cpp`): `pwman export [csv|xml] [path]` decrypts all
+  entries + TOTP config and writes a file (RFC 4180 CSV or escaped XML), `0600`, with a
+  plaintext warning; secrets zeroed after write. Fixed a pre-existing compile error (a stray
+  `;` broke the `print_usage` `<<` chain) and the stub that printed raw `ListItem`s.
+- **Config / default vault path**: new `configured_db_path()` resolves `--db` > `PWMAN_DB`
+  env > `~/.pwman/config` (`db=` line) > built-in default. `pwman config [db <path>|clear]`
+  manages the stored default (`database.cpp` config helpers, `cmd_config`, `main.cpp` wiring).
+- **Status flash fix** (`list_ui.cpp`): "Copied …" messages now expire via a timestamp
+  (`flash_status`) instead of a blocking `sleep`, so the UI never freezes.
+- **Docs**: new `docs/` set — installation, usage, configuration, architecture, export,
+  development (+ index). README rewritten as a modern landing page with badges (license,
+  C++17, CMake, platforms, tests, coverage, encryption), quick start, and a UI preview.
+- **Test coverage**: measured with Clang source-based coverage — ~66% line coverage of the
+  unit-tested core modules (base32/crypto/database/hmac/terminal). CLI/TUI/totp are covered
+  by manual integration testing. Reproduction documented in `docs/development.md`.
+- `.gitignore`: added `build-cov/`, coverage artifacts, `*.pwv`, `pwman-export.*`.
+
+## Latest Change — list UI fixes: TOTP padding, search, TOTP copy (2026-07-19)
+
+- **TOTP zero-padding fix** (`totp.cpp`): `totp_generate` now left-pads to `digits` and uses an
+  integer power of ten instead of `std::pow`. Codes with leading zeros were printing short
+  (e.g. `48290` instead of `048290`); combined with row clipping this looked like "zeros cut
+  off the end". All codes are now exactly `digits` wide.
+- **No column clipping** (`list_ui.cpp`): Name/Username columns capped (`kNameMax`/`kUserMax`,
+  20) so a long value can't push the TOTP column off the right edge.
+- **Copy TOTP** from the list: `t` copies the selected entry's current code (raw digits, no
+  spacing) to the clipboard.
+- **Search/filter**: `/` opens a search bar; typing filters rows by name or username
+  (case-insensitive); `Esc` clears, `Enter` keeps the filter and returns to navigation. Header
+  shows `(matched/total entries)`.
+- **Non-interactive TOTP** (`commands.cpp`): `live_totp_display` now prints a single code and
+  returns when stdin isn't a TTY, instead of spinning on pipe EOF — fixes the latent hang and
+  makes `totp add`/`totp` scriptable.
+- **Test vault generator**: `scripts/gen_test_vault.sh` builds a sample `.pwv` (10 entries, 4
+  with TOTP; master `test1234`). Verified end-to-end over a PTY: search, reveal, TOTP copy
+  (6-digit), live countdown, clean quit. 88 tests still pass.
+
+## Latest Change — Interactive `list` UI with FTXUI (2026-07-19)
+
+- **FTXUI** (v7.0.1) pulled in via CMake `FetchContent` (examples/docs/tests off). Linked
+  `PRIVATE` to `pwman_lib`; propagates to the executable since the lib is static.
+- New module **`src/list_ui.cpp` / `includes/list_ui.h`** (`run_list_ui`, `VaultRow`). `list`
+  now opens a full-screen navigable table with **Name · Username · Password · TOTP** columns
+  instead of the old plaintext table.
+  - Passwords rendered as a **fixed-width `*` mask** (8 chars, `kMaskWidth`) so the display
+    leaks nothing about real length; `r`/`Enter` reveals the selected one, `c` copies it.
+  - Entries with TOTP show a **live** code + countdown; a background ticker thread posts a
+    repaint event ~4×/sec.
+  - Keys: `↑`/`↓` or `j`/`k` move, `r`/`Enter` reveal, `c` copy, `q`/`Esc` quit.
+- `cmd_list` now derives the field key and decrypts each entry (+ its TOTP secret) into
+  `VaultRow`s, runs the UI, then `secure_zero`s all held secrets.
+- **Refactor**: `copy_to_clipboard` moved from a `commands.cpp` static into `terminal.{h,cpp}`
+  (`pwman::copy_to_clipboard`), now shared by the TOTP view and the list UI.
+- Verified over a PTY: table renders both entries, mask shows, arrow-nav + reveal + clipboard
+  copy work, live TOTP countdown renders, `q` exits cleanly (rc 0). All 88 unit tests pass.
+- Latent (pre-existing, not triggered in real tty use): `live_totp_display` mixes buffered
+  `std::cin` with raw `read()` and loops forever on stdin EOF — only bites under piped input.
+
 ## Latest Change — SQLCipher whole-database encryption (2026-07-17)
 
 - **SQLCipher** replaces plain SQLite (`pkg_check_modules(... sqlcipher)`); it is a drop-in

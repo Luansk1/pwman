@@ -1,192 +1,116 @@
-# pwman - Command Line Password Manager
+<div align="center">
 
-A secure command-line password manager written in C++17. The entire database is encrypted at rest with **SQLCipher**, and individual fields are additionally sealed with XChaCha20-Poly1305 (via libsodium) as defence in depth. Everything is protected by a single master password derived using Argon2id.
+# 🔐 pwman
 
-## Features
+**A secure, command-line password manager for your terminal.**
 
-- **Full-database encryption**: SQLCipher encrypts the whole SQLite file — table names, indexes and structure are opaque at rest, not just the values
-- **Layered field encryption**: XChaCha20-Poly1305 authenticated encryption for each stored field on top of the SQLCipher layer
-- **Secure key derivation**: Argon2id with moderate parameters (via `crypto_pwhash`)
-- **Custom vault format**: databases use the `.pwv` extension and carry a recognition magic in the SQLite header so pwman can positively identify its own vaults
-- **Local storage**: single encrypted file, no network access required
-- **Hidden input**: Master password and entry passwords are never shown during input
-- **Password generator**: Built-in cryptographically secure random password generation
-- **Cross-platform**: Works on Linux, macOS, and Windows
+Fully-encrypted local vault · two-factor (TOTP) codes · an interactive TUI — all in a single C++17 binary.
 
-## Features coming soon
-- **TOTP Support**
-- **Entropie calculation**
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](CHANGELOG.md)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
+[![Build: CMake](https://img.shields.io/badge/build-CMake-064F8C.svg?logo=cmake&logoColor=white)](CMakeLists.txt)
+[![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](docs/installation.md)
+[![Tests](https://img.shields.io/badge/tests-88%20passing-brightgreen.svg)](docs/development.md)
+[![Coverage](https://img.shields.io/badge/coverage-66%25-yellow.svg)](docs/development.md#test-coverage)
+[![Encryption](https://img.shields.io/badge/encryption-SQLCipher%20%2B%20libsodium-8A2BE2.svg)](docs/architecture.md)
 
-## Security Design
+</div>
 
-```
-                 Master Password
-                  /           \
-                 v             v
-   SQLCipher (PBKDF2)     Argon2id (salt in DB)
-        |                      |
-        v                      v
-  Whole-file key          256-bit field key
-        |                      |
-        v                      v
-  Encrypted .pwv file    XChaCha20-Poly1305 per field
-```
+---
 
-- The same master password unlocks two independent layers: SQLCipher (whole-file, its KDF salt lives in the file's plaintext 16-byte header) and Argon2id (per-field, its salt is stored inside the now-encrypted database).
-- The master password is never stored. A verification token (`"pwman_verify"`) is encrypted and stored; on unlock, the token is decrypted to verify the field key.
-- Each field (username, password, URL, notes) is encrypted independently with a unique random nonce.
-- Because the whole file is encrypted, **every** command — including `list` — now requires the master password. Entry names are no longer readable without unlocking.
-- Vaults use the `.pwv` extension (the CLI refuses other file names) and set `PRAGMA application_id = 0x50574D31` ("PWM1") as a recognition magic, checked after decryption to confirm the file is a genuine pwman vault.
-- Sensitive memory (keys, decrypted passwords) is zeroed using `sodium_memzero`.
+`pwman` keeps your credentials in a single **SQLCipher-encrypted** vault file, with a
+second layer of **XChaCha20-Poly1305** field encryption on top — both unlocked by one
+master password derived with **Argon2id**. Browse everything in a live terminal UI, with
+built-in TOTP two-factor codes and CSV/XML export.
 
-## TOTP Flow
+## ✨ Features
 
-## Dependencies
+- 🔒 **Full-database encryption** — the entire vault (structure *and* values) is opaque at rest via SQLCipher, with per-field XChaCha20-Poly1305 as defence in depth.
+- 🔑 **Strong key derivation** — Argon2id for the field key; the master password is never stored.
+- 🖥️ **Interactive TUI** — browse, search, reveal, and copy from a full-screen [FTXUI](https://github.com/ArthurSonzogni/FTXUI) table.
+- ⏱️ **Two-factor (TOTP)** — RFC 6238 codes with a live, self-updating display and clipboard copy.
+- 🎭 **Length-hiding masks** — passwords render as a fixed-width `*` so the display leaks nothing about their length.
+- 🎲 **Password generator** — cryptographically secure, with strength feedback.
+- 📤 **Import / export** — CSV import and CSV/XML export, with a lossless round-trip.
+- 🗂️ **Flexible vault location** — per-command `--db`, a `PWMAN_DB` env var, or a saved default.
+- 💻 **Cross-platform** — Linux, macOS, and Windows.
 
-- **libsodium** >= 1.0.18
-- **SQLCipher** >= 4.0 (provides the `<sqlite3.h>` API with transparent encryption)
-- **CMake** >= 3.16
-- **pkg-config**
-- A C++17-capable compiler (GCC 8+, Clang 7+, MSVC 2019+)
+## 🚀 Quick start
 
-### Install dependencies
-
-**macOS (Homebrew):**
 ```bash
+# 1. Install dependencies (macOS shown; see docs for Linux/Windows)
 brew install libsodium sqlcipher pkg-config cmake
+
+# 2. Build
+git clone https://github.com/Luansk1/pwman.git
+cd pwman
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+# 3. (optional) put it on your PATH
+ln -sf "$(pwd)/build/pwman" /usr/local/bin/pwman
+
+# 4. Use it
+pwman init          # create your vault + master password
+pwman add           # add an entry
+pwman list          # browse in the interactive UI
 ```
 
-**Ubuntu/Debian:**
-```bash
-sudo apt install libsodium-dev libsqlcipher-dev pkg-config cmake g++
-```
+> First build fetches FTXUI + GoogleTest via CMake, so it needs network access.
+> Full instructions (all platforms, install options): **[docs/installation.md](docs/installation.md)**.
 
-**Arch Linux:**
-```bash
-sudo pacman -S libsodium sqlcipher pkg-config cmake
-```
-
-**Windows (vcpkg):**
-```powershell
-vcpkg install libsodium sqlcipher
-```
-
-## Build
-
-```bash
-mkdir build && cd build
-cmake ..
-cmake --build .
-```
-
-The binary is produced at `build/pwman`.
-
-## Usage
-
-### Initialize database
-
-```bash
-pwman init
-```
-
-Creates a new encrypted vault at `~/.pwman/pwman.pwv` and sets the master password.
-
-### Add an entry
-
-```bash
-pwman add
-```
-
-Prompts for master password, then entry details (name, username, password, URL, notes). Leave the password empty to auto-generate one.
-
-### Retrieve an entry
-
-```bash
-pwman get <name>
-```
-
-Displays the entry in a formatted table after master password verification.
+## 🎬 The `list` UI
 
 ```
-+----------+-----------------------+
-| Field    | Value                 |
-+----------+-----------------------+
-| Name     | github                |
-| Username | user@example.com      |
-| Password | s3cur3Pa$$w0rd!       |
-| URL      | https://github.com    |
-| Notes    | personal account      |
-+----------+-----------------------+
+╭──────────────────── pwman — vault (3/10 entries) ────────────────────╮
+│ Name       Username             Password   TOTP                       │
+│ ─────────  ──────────────────   ────────   ───────────────            │
+│ aws        admin                ********    576 163  (18s)            │
+│ github     octocat@example.com  ********    405 830  (18s)            │
+│ gmail      jane.doe@gmail.com   ********    —                         │
+├───────────────────────────────────────────────────────────────────────┤
+│ ↑/↓ move · r reveal · c copy pw · t copy TOTP · / search · q quit      │
+╰───────────────────────────────────────────────────────────────────────╯
 ```
 
-### List all entries
+`↑/↓` move · `r` reveal · `c` copy password · `t` copy TOTP · `/` search · `q` quit.
 
-```bash
-pwman list
-```
+## 📚 Documentation
 
-Shows all entry names. Requires the master password, since the whole database is encrypted.
+| Guide | Description |
+|-------|-------------|
+| [Installation](docs/installation.md) | Dependencies, building, installing to your `PATH` |
+| [Usage](docs/usage.md) | Every command and the interactive UI |
+| [Configuration](docs/configuration.md) | Default vault, `PWMAN_DB`, `--db` |
+| [Architecture](docs/architecture.md) | Encryption layers, vault format, threat model |
+| [Export & Import](docs/export.md) | CSV/XML export and CSV import formats |
+| [Development](docs/development.md) | Project layout, tests, coverage |
 
-### Delete an entry
+## 🛡️ Security at a glance
 
-```bash
-pwman del <name>
-```
+- **Two layers, one password:** SQLCipher encrypts the whole file; libsodium encrypts each field.
+- **Never stored:** the master password is verified against an encrypted token, compared in constant time.
+- **Recognition magic:** vaults carry `application_id = 0x50574D31` (`PWM1`) so pwman only opens its own files.
+- **Hygiene:** keys and plaintext are wiped with `sodium_memzero`; the vault file is `0600`.
 
-Requires master password verification, then asks for confirmation.
+Full details and threat model in **[docs/architecture.md](docs/architecture.md)**.
 
-### Generate a password
-
-```bash
-pwman gen [length]
-```
-
-Generates a random password (default: 20 characters). Does not require the database.
-
-### Custom database path
-
-```bash
-pwman --db /path/to/custom.db <command>
-```
-
-## Testing
+## 🧪 Testing
 
 ```bash
 cd build
-cmake --build .
 ctest --output-on-failure
 ```
 
-Tests cover:
-- Encryption/decryption round trips
-- Key derivation consistency
-- Tamper detection (corrupted/truncated ciphertext)
-- Database CRUD operations
-- Table formatting output
+88 GoogleTest cases cover the crypto, storage, Base32, HMAC and terminal modules.
+See **[docs/development.md](docs/development.md)** for coverage measurement.
 
-## Project Structure
+## 📝 Changelog
 
-```
-pwman/
-├── CMakeLists.txt          # Build configuration
-├── README.md               # This file
-├── include/
-│   ├── crypto.h            # Encryption & key derivation
-│   ├── database.h          # SQLite storage layer
-│   ├── terminal.h          # Terminal I/O utilities
-│   └── commands.h          # CLI command implementations
-├── src/
-│   ├── main.cpp            # Entry point & argument parsing
-│   ├── crypto.cpp          # libsodium wrapper
-│   ├── database.cpp        # SQLite operations
-│   ├── terminal.cpp        # Hidden input & table printing
-│   └── commands.cpp        # Command logic (init/add/get/list/del/gen)
-└── tests/
-    ├── test_crypto.cpp     # Crypto module tests
-    ├── test_database.cpp   # Database module tests
-    └── test_terminal.cpp   # Terminal output tests
-```
+Notable changes are recorded in [CHANGELOG.md](CHANGELOG.md), following
+[Semantic Versioning](https://semver.org).
 
-## License
+## 📄 License
 
-See [LICENSE](LICENSE) file.
+Released under the [MIT License](LICENSE).
